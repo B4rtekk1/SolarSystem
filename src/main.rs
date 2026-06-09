@@ -123,15 +123,15 @@ impl State {
 
         let sun_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Sun Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("sun.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/sun.wgsl").into()),
         });
         let planet_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Planet Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("planet.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/planet.wgsl").into()),
         });
         let orbit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Orbit Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("orbit.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/orbit.wgsl").into()),
         });
 
         let camera = Camera::default();
