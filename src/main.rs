@@ -1,3 +1,7 @@
+mod camera;
+mod color;
+mod moon;
+mod orbit;
 pub mod planet;
 pub mod sun;
 
@@ -7,8 +11,11 @@ use std::{
     time::Instant,
 };
 
+use camera::Camera;
+use color::Color as PlanetColor;
 use glam::{Mat4, Vec3};
-use planet::{Atmosphere, Color as PlanetColor, Orbit as PlanetOrbit, Planet, PlanetShader};
+use orbit::Orbit as PlanetOrbit;
+use planet::{Atmosphere, Planet, PlanetShader};
 use sun::Sun;
 use wgpu::{Surface, util::DeviceExt};
 use winit::{
@@ -27,6 +34,7 @@ const ORBIT_SPEED: f32 = 0.01;
 const ZOOM_SPEED: f32 = 0.12;
 const MIN_CAMERA_DISTANCE: f32 = 1.35;
 const MAX_CAMERA_DISTANCE: f32 = 40.0;
+const MSAA_SAMPLE_COUNT: u32 = 4;
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
 
 type Vertex = [f32; 3];
@@ -39,55 +47,14 @@ struct DepthTarget {
     view: wgpu::TextureView,
 }
 
+struct MsaaTarget {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
 struct PlanetGpu {
     object_buffer: wgpu::Buffer,
     object_bind_group: wgpu::BindGroup,
-}
-
-struct Camera {
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
-}
-
-impl Default for Camera {
-    fn default() -> Self {
-        Self {
-            yaw: 0.45,
-            pitch: 0.25,
-            distance: 8.5,
-        }
-    }
-}
-
-impl Camera {
-    fn orbit(&mut self, delta_x: f64, delta_y: f64) {
-        self.yaw = (self.yaw + delta_x as f32 * ORBIT_SPEED).rem_euclid(TAU);
-        self.pitch = (self.pitch + delta_y as f32 * ORBIT_SPEED).rem_euclid(TAU);
-    }
-
-    fn zoom(&mut self, scroll_delta: f32) {
-        let zoom_factor = (1.0 - scroll_delta * ZOOM_SPEED).max(0.2);
-        self.distance =
-            (self.distance * zoom_factor).clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
-    }
-
-    fn view_projection(&self, width: u32, height: u32) -> CameraUniform {
-        let aspect = width.max(1) as f32 / height.max(1) as f32;
-        let (yaw_sin, yaw_cos) = self.yaw.sin_cos();
-        let (pitch_sin, pitch_cos) = self.pitch.sin_cos();
-
-        let eye = Vec3::new(
-            self.distance * pitch_cos * yaw_sin,
-            self.distance * pitch_sin,
-            self.distance * pitch_cos * yaw_cos,
-        );
-        let up = Vec3::new(-pitch_sin * yaw_sin, pitch_cos, -pitch_sin * yaw_cos);
-
-        let view = Mat4::look_at_rh(eye, Vec3::ZERO, up);
-        let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
-        (projection * view).to_cols_array()
-    }
 }
 
 struct State {
@@ -110,6 +77,7 @@ struct State {
     sun_object_buffer: wgpu::Buffer,
     sun_object_bind_group: wgpu::BindGroup,
     planet_gpu: Vec<PlanetGpu>,
+    msaa: MsaaTarget,
     depth: DepthTarget,
     camera: Camera,
     sun: Sun,
@@ -306,6 +274,7 @@ impl State {
             format,
             &pipeline_layout,
             &sun_shader,
+            MSAA_SAMPLE_COUNT,
             "Sun Pipeline",
         );
         let planet_pipeline = create_sphere_pipeline(
@@ -313,6 +282,7 @@ impl State {
             format,
             &pipeline_layout,
             &planet_shader,
+            MSAA_SAMPLE_COUNT,
             "Planet Pipeline",
         );
 
@@ -356,7 +326,10 @@ impl State {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: MSAA_SAMPLE_COUNT,
+                ..Default::default()
+            },
             multiview_mask: None,
             cache: None,
         });
@@ -374,6 +347,7 @@ impl State {
         });
         let index_count = indices.len() as u32;
         let orbit_vertex_count = ORBIT_SEGMENTS * 2;
+        let msaa = create_msaa_target(&device, config.width, config.height, format);
         let depth = create_depth_target(&device, config.width, config.height);
 
         Self {
@@ -396,6 +370,7 @@ impl State {
             sun_object_buffer,
             sun_object_bind_group,
             planet_gpu,
+            msaa,
             depth,
             camera,
             sun,
@@ -412,6 +387,7 @@ impl State {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.msaa = create_msaa_target(&self.device, width, height, self.config.format);
         self.depth = create_depth_target(&self.device, width, height);
     }
 
@@ -558,8 +534,8 @@ impl State {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: &self.msaa.view,
+                    resolve_target: Some(&view),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -568,7 +544,7 @@ impl State {
                             b: 0.04,
                             a: 1.0,
                         }),
-                        store: wgpu::StoreOp::Store,
+                        store: wgpu::StoreOp::Discard,
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -706,6 +682,7 @@ fn create_sphere_pipeline(
     format: wgpu::TextureFormat,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
+    sample_count: u32,
     label: &str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -739,10 +716,41 @@ fn create_sphere_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: sample_count,
+            ..Default::default()
+        },
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn create_msaa_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> MsaaTarget {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("MSAA Color Texture"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: MSAA_SAMPLE_COUNT,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+
+    MsaaTarget {
+        _texture: texture,
+        view,
+    }
 }
 
 fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
@@ -754,7 +762,7 @@ fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthT
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: MSAA_SAMPLE_COUNT,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
