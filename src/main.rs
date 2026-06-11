@@ -3,24 +3,29 @@ mod color;
 mod ecs;
 mod nbody;
 mod orbit;
+mod fps_overlay;
+mod orbit_render;
 
 use std::{
     collections::VecDeque,
     f32::consts::{PI, TAU},
-    sync::Arc,
+    sync::{Arc},
     time::Instant,
 };
 
 use camera::Camera;
 use color::Color;
 use cosmic_text::{
-    Attrs, Buffer as TextBuffer, Color as TextColor, Family, FontSystem, Metrics, Shaping,
+    Attrs, Buffer as TextBuffer, Color as TextColor, Family, FontSystem, Shaping,
     SwashCache,
 };
 use ecs::{
     AtmosphereComponent, BodyComponent, CelestialKind, Entity, MaterialComponent, ObjectBundle,
     RenderComponent, RotationComponent, StarMaterial, SurfaceMaterial, World,
 };
+
+use fps_overlay::*;
+use orbit_render::*;
 use glam::{DVec3, Mat4, Vec3};
 use nbody::{NBodyConfig, NBodySimulation};
 use orbit::Orbit as PlanetOrbit;
@@ -40,6 +45,7 @@ const ORBIT_TRAIL_POINTS: usize = 768;
 const ORBIT_TRAIL_SAMPLE_YEARS: f64 = 1.0 / 96.0;
 const ORBIT_FORECAST_MAX_POINTS: usize = 2048;
 const ORBIT_FORECAST_SAMPLE_YEARS: f64 = 1.0 / 64.0;
+const ORBIT_FORECAST_UPDATE_INTERVAL_SECONDS: f64 = 0.25;
 const ORBIT_VERTICES_PER_SEGMENT: usize = 6;
 const PLANET_ORBIT_HALF_WIDTH_PIXELS: f32 = 1.75;
 const MOON_ORBIT_HALF_WIDTH_PIXELS: f32 = 0.55;
@@ -89,19 +95,6 @@ struct ObjectGpu {
     object_buffer: wgpu::Buffer,
     object_bind_group: wgpu::BindGroup,
 }
-
-struct FpsOverlay {
-    font_system: FontSystem,
-    swash_cache: SwashCache,
-    text_buffer: TextBuffer,
-    font_family: String,
-    text_texture: wgpu::Texture,
-    text_bind_group: wgpu::BindGroup,
-    text_vertex_count: u32,
-    text_vertex_buffer: wgpu::Buffer,
-    last_text: String,
-}
-
 struct State {
     window: Arc<Window>,
     surface: Surface<'static>,
@@ -128,9 +121,15 @@ struct State {
     world: World,
     physics: NBodySimulation,
     orbit_trails: Vec<VecDeque<Vec3>>,
+    orbit_forecasts: Vec<Vec<DVec3>>,
+    moon_orbit_offsets: Vec<(Entity, Vec<DVec3>)>,
+    orbit_segments: Vec<OrbitSegment>,
+    forecast_worker: OrbitForecastWorker,
     start_time: Instant,
     last_physics_update: Instant,
     last_orbit_sample_year: f64,
+    last_orbit_forecast_request: Instant,
+    orbit_segments_dirty: bool,
     fps_frame_count: u32,
     fps_last_update: Instant,
     current_fps: f64,
@@ -164,7 +163,7 @@ impl State {
             format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: wgpu::PresentMode::Immediate,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -308,19 +307,25 @@ impl State {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let orbit_forecast = physics
+        let orbit_forecasts = physics
             .forecast_full_planet_orbits(ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS);
-        let moon_orbit_forecast = physics.forecast_full_moon_orbits(
+        let moon_orbit_offsets = physics.forecast_full_moon_orbit_offsets(
             MOON_ORBIT_FORECAST_MAX_POINTS,
             MOON_ORBIT_FORECAST_SAMPLE_YEARS,
         );
-        let orbit_segments = build_orbit_segments(
-            &orbit_trails,
-            &orbit_forecast,
-            &moon_orbit_forecast,
+        let mut orbit_segments = Vec::with_capacity(max_orbit_segment_count(
             &world,
+            physics.planet_entities().len(),
+        ));
+        build_orbit_segments(
+            &orbit_trails,
+            &orbit_forecasts,
+            &moon_orbit_offsets,
+            &world,
+            &physics,
             physics.planet_entities(),
             orbit_width_scale(&camera),
+            &mut orbit_segments,
         );
         if !orbit_segments.is_empty() {
             queue.write_buffer(&orbit_buffer, 0, bytemuck::cast_slice(&orbit_segments));
@@ -437,6 +442,7 @@ impl State {
         );
         let msaa = create_msaa_target(&device, config.width, config.height, format);
         let depth = create_depth_target(&device, config.width, config.height);
+        let forecast_worker = OrbitForecastWorker::new();
         let now = Instant::now();
 
         Self {
@@ -465,9 +471,15 @@ impl State {
             world,
             physics,
             orbit_trails,
+            orbit_forecasts,
+            moon_orbit_offsets,
+            orbit_segments,
+            forecast_worker,
             start_time: now,
             last_physics_update: now,
             last_orbit_sample_year: 0.0,
+            last_orbit_forecast_request: now,
+            orbit_segments_dirty: false,
             fps_frame_count: 0,
             fps_last_update: now,
             current_fps: 0.0,
@@ -496,12 +508,13 @@ impl State {
 
     fn zoom_camera(&mut self, scroll_delta: f32) {
         self.camera.zoom(scroll_delta);
+        self.orbit_segments_dirty = true;
     }
 
-    fn update_orbit_trails(&mut self) {
+    fn update_orbit_trails(&mut self) -> bool {
         let elapsed_years = self.physics.elapsed_years();
         if elapsed_years - self.last_orbit_sample_year < ORBIT_TRAIL_SAMPLE_YEARS {
-            return;
+            return false;
         }
 
         self.last_orbit_sample_year = elapsed_years;
@@ -511,6 +524,55 @@ impl State {
             }
             trail.push_back(dvec3_to_vec3(self.physics.planet_position(index)));
         }
+
+        true
+    }
+
+    fn poll_orbit_forecasts(&mut self) {
+        let Some(result) = self.forecast_worker.poll() else {
+            return;
+        };
+
+        self.orbit_forecasts = result.orbit_forecasts;
+        self.moon_orbit_offsets = result.moon_orbit_offsets;
+        self.orbit_segments_dirty = true;
+    }
+
+    fn request_orbit_forecasts_if_needed(&mut self, now: Instant) {
+        if now
+            .duration_since(self.last_orbit_forecast_request)
+            .as_secs_f64()
+            < ORBIT_FORECAST_UPDATE_INTERVAL_SECONDS
+        {
+            return;
+        }
+
+        if self.forecast_worker.request(&self.physics) {
+            self.last_orbit_forecast_request = now;
+        }
+    }
+
+    fn upload_orbit_segments(&mut self) {
+        self.orbit_segments.clear();
+        build_orbit_segments(
+            &self.orbit_trails,
+            &self.orbit_forecasts,
+            &self.moon_orbit_offsets,
+            &self.world,
+            &self.physics,
+            self.physics.planet_entities(),
+            orbit_width_scale(&self.camera),
+            &mut self.orbit_segments,
+        );
+        self.orbit_vertex_count = orbit_draw_vertex_count(&self.orbit_segments);
+        if !self.orbit_segments.is_empty() {
+            self.queue.write_buffer(
+                &self.orbit_buffer,
+                0,
+                bytemuck::cast_slice(&self.orbit_segments),
+            );
+        }
+        self.orbit_segments_dirty = false;
     }
 
     fn toggle_borderless_fullscreen(&self) {
@@ -699,26 +761,9 @@ impl State {
             bytemuck::cast_slice(&[camera_uniform]),
         );
 
-        let orbit_forecast = self
-            .physics
-            .forecast_full_planet_orbits(ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS);
-        let moon_orbit_forecast = self.physics.forecast_full_moon_orbits(
-            MOON_ORBIT_FORECAST_MAX_POINTS,
-            MOON_ORBIT_FORECAST_SAMPLE_YEARS,
-        );
-        let orbit_segments = build_orbit_segments(
-            &self.orbit_trails,
-            &orbit_forecast,
-            &moon_orbit_forecast,
-            &self.world,
-            self.physics.planet_entities(),
-            orbit_width_scale(&self.camera),
-        );
-        self.orbit_vertex_count = orbit_draw_vertex_count(&orbit_segments);
-        if !orbit_segments.is_empty() {
-            self.queue
-                .write_buffer(&self.orbit_buffer, 0, bytemuck::cast_slice(&orbit_segments));
-        }
+        self.poll_orbit_forecasts();
+        self.request_orbit_forecasts_if_needed(now);
+        self.upload_orbit_segments();
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
         for object_gpu in &self.object_gpu {
@@ -814,140 +859,6 @@ impl State {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         self.update_fps_counter(Instant::now());
-    }
-}
-
-impl FpsOverlay {
-    fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        text_bind_group_layout: &wgpu::BindGroupLayout,
-        viewport_width: u32,
-        viewport_height: u32,
-    ) -> Self {
-        let mut font_system = FontSystem::new();
-        let font_family = {
-            let db = font_system.db_mut();
-            let existing_face_count = db.len();
-            db.load_font_data(GOOGLE_SANS_BYTES.to_vec());
-            let family = db
-                .faces()
-                .skip(existing_face_count)
-                .next()
-                .and_then(|face| face.families.first())
-                .map_or_else(|| "Google Sans".to_string(), |(family, _)| family.clone());
-            db.set_sans_serif_family(&family);
-            family
-        };
-        let mut text_buffer = TextBuffer::new(
-            &mut font_system,
-            Metrics::new(FPS_FONT_SIZE, FPS_LINE_HEIGHT),
-        );
-        text_buffer.set_size(
-            &mut font_system,
-            Some(FPS_TEXT_TEXTURE_WIDTH as f32),
-            Some(FPS_TEXT_TEXTURE_HEIGHT as f32),
-        );
-
-        let text_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("FPS Text Texture"),
-            size: wgpu::Extent3d {
-                width: FPS_TEXT_TEXTURE_WIDTH,
-                height: FPS_TEXT_TEXTURE_HEIGHT,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let text_texture_view = text_texture.create_view(&Default::default());
-        let text_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("FPS Text Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let text_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("FPS Text Bind Group"),
-            layout: text_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&text_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&text_sampler),
-                },
-            ],
-        });
-        let text_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("FPS Text Vertex Buffer"),
-            size: (TEXT_OVERLAY_MAX_VERTICES * std::mem::size_of::<TextOverlayVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut overlay = Self {
-            font_system,
-            swash_cache: SwashCache::new(),
-            text_buffer,
-            font_family,
-            text_texture,
-            text_bind_group,
-            text_vertex_count: 0,
-            text_vertex_buffer,
-            last_text: String::new(),
-        };
-        overlay.update(queue, 0.0, viewport_width, viewport_height);
-        overlay
-    }
-
-    fn update(&mut self, queue: &wgpu::Queue, fps: f64, viewport_width: u32, viewport_height: u32) {
-        let text = format!("FPS {:.0}", fps);
-        if self.last_text != text {
-            let pixels = rasterize_google_sans_text(
-                &mut self.font_system,
-                &mut self.swash_cache,
-                &mut self.text_buffer,
-                &self.font_family,
-                &text,
-            );
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.text_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &pixels,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(FPS_TEXT_TEXTURE_WIDTH * 4),
-                    rows_per_image: Some(FPS_TEXT_TEXTURE_HEIGHT),
-                },
-                wgpu::Extent3d {
-                    width: FPS_TEXT_TEXTURE_WIDTH,
-                    height: FPS_TEXT_TEXTURE_HEIGHT,
-                    depth_or_array_layers: 1,
-                },
-            );
-            self.last_text = text;
-        }
-
-        let text_vertices = build_fps_text_vertices(viewport_width, viewport_height);
-        self.text_vertex_count = text_vertices.len() as u32;
-        queue.write_buffer(
-            &self.text_vertex_buffer,
-            0,
-            bytemuck::cast_slice(&text_vertices),
-        );
     }
 }
 
@@ -1377,165 +1288,6 @@ fn entity_object_uniform(
 fn dvec3_to_vec3(position: DVec3) -> Vec3 {
     Vec3::new(position.x as f32, position.y as f32, position.z as f32)
 }
-
-fn max_orbit_segment_count(world: &World, planet_count: usize) -> usize {
-    let trail_segments = ORBIT_TRAIL_POINTS.saturating_sub(1);
-    let forecast_segments = ORBIT_FORECAST_MAX_POINTS;
-    let planet_segments = (trail_segments + forecast_segments) * planet_count;
-    let moon_segments = world.count_kind(CelestialKind::Moon) * MOON_ORBIT_FORECAST_MAX_POINTS;
-    (planet_segments + moon_segments).max(1)
-}
-
-fn orbit_draw_vertex_count(segments: &[OrbitSegment]) -> u32 {
-    (segments.len() * ORBIT_VERTICES_PER_SEGMENT) as u32
-}
-
-fn create_orbit_trails(physics: &NBodySimulation) -> Vec<VecDeque<Vec3>> {
-    physics
-        .planet_entities()
-        .iter()
-        .map(|entity| {
-            let mut trail = VecDeque::with_capacity(ORBIT_TRAIL_POINTS);
-            trail.push_back(dvec3_to_vec3(physics.position(*entity)));
-            trail
-        })
-        .collect()
-}
-
-fn build_orbit_segments(
-    trails: &[VecDeque<Vec3>],
-    forecasts: &[Vec<DVec3>],
-    moon_forecasts: &[(Entity, Vec<DVec3>)],
-    world: &World,
-    planet_entities: &[Entity],
-    orbit_width_scale: f32,
-) -> Vec<OrbitSegment> {
-    let mut segments = Vec::with_capacity(max_orbit_segment_count(world, planet_entities.len()));
-    let planet_half_width_pixels = PLANET_ORBIT_HALF_WIDTH_PIXELS * orbit_width_scale;
-    let moon_half_width_pixels = MOON_ORBIT_HALF_WIDTH_PIXELS * orbit_width_scale;
-
-    for (trail, entity) in trails.iter().zip(planet_entities.iter()) {
-        let segment_count = trail.len().saturating_sub(1);
-        if segment_count == 0 {
-            continue;
-        }
-
-        let color = orbit_color(world, *entity);
-        let mut previous = trail[0];
-        for (segment_index, current) in trail.iter().skip(1).enumerate() {
-            let age = (segment_index + 1) as f32 / segment_count as f32;
-            let vertex_color = [color[0], color[1], color[2], 0.08 + age * 0.34];
-            segments.push(orbit_segment(
-                previous,
-                *current,
-                vertex_color,
-                planet_half_width_pixels,
-            ));
-            previous = *current;
-        }
-    }
-
-    for ((forecast, entity), trail) in forecasts
-        .iter()
-        .zip(planet_entities.iter())
-        .zip(trails.iter())
-    {
-        if forecast.len() < 2 {
-            continue;
-        }
-
-        let color = orbit_color(world, *entity);
-        let future_color = [
-            (color[0] * 1.35).min(1.0),
-            (color[1] * 1.35).min(1.0),
-            (color[2] * 1.35).min(1.0),
-        ];
-        let segment_count = forecast.len() - 1;
-        let mut previous = trail
-            .back()
-            .copied()
-            .unwrap_or_else(|| dvec3_to_vec3(forecast[0]));
-
-        for (segment_index, current) in forecast.iter().skip(1).enumerate() {
-            let age = (segment_index + 1) as f32 / segment_count as f32;
-            let alpha = 0.48 * (1.0 - age).max(0.0) + 0.06;
-            let vertex_color = [future_color[0], future_color[1], future_color[2], alpha];
-            let current = dvec3_to_vec3(*current);
-            segments.push(orbit_segment(
-                previous,
-                current,
-                vertex_color,
-                planet_half_width_pixels,
-            ));
-            previous = current;
-        }
-    }
-
-    for (moon, forecast) in moon_forecasts {
-        if forecast.len() < 2 {
-            continue;
-        }
-
-        let color = orbit_color(world, *moon);
-        let future_color = [
-            (color[0] * 1.45).min(1.0),
-            (color[1] * 1.45).min(1.0),
-            (color[2] * 1.45).min(1.0),
-        ];
-        let segment_count = forecast.len() - 1;
-        let mut previous = dvec3_to_vec3(forecast[0]);
-
-        for (segment_index, current) in forecast.iter().skip(1).enumerate() {
-            let age = (segment_index + 1) as f32 / segment_count as f32;
-            let alpha = 0.36 * (1.0 - age).max(0.0) + 0.05;
-            let vertex_color = [future_color[0], future_color[1], future_color[2], alpha];
-            let current = dvec3_to_vec3(*current);
-            segments.push(orbit_segment(
-                previous,
-                current,
-                vertex_color,
-                moon_half_width_pixels,
-            ));
-            previous = current;
-        }
-    }
-
-    segments
-}
-
-fn orbit_width_scale(camera: &Camera) -> f32 {
-    (DEFAULT_CAMERA_DISTANCE / camera.distance())
-        .clamp(MIN_ORBIT_WIDTH_SCALE, MAX_ORBIT_WIDTH_SCALE)
-}
-
-fn orbit_color(world: &World, entity: Entity) -> [f32; 3] {
-    world
-        .surface_material(entity)
-        .map_or(Color::rgb(0.7, 0.7, 0.7), |material| material.base_color)
-        .as_array()
-}
-
-fn orbit_segment(start: Vec3, end: Vec3, color: [f32; 4], half_width_pixels: f32) -> OrbitSegment {
-    [
-        start.x,
-        start.y,
-        start.z,
-        1.0,
-        end.x,
-        end.y,
-        end.z,
-        1.0,
-        color[0],
-        color[1],
-        color[2],
-        color[3],
-        half_width_pixels,
-        0.0,
-        0.0,
-        0.0,
-    ]
-}
-
 fn create_world() -> World {
     let mut world = World::default();
     let star = world.spawn(star_bundle());

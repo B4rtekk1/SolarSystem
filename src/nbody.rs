@@ -341,6 +341,72 @@ impl NBodySimulation {
         forecast
     }
 
+    pub fn forecast_full_moon_orbit_offsets(
+        &self,
+        max_sample_count: usize,
+        sample_interval_years: f64,
+    ) -> Vec<(Entity, Vec<DVec3>)> {
+        let mut forecast = self
+            .moon_orbits
+            .iter()
+            .map(|target| {
+                let mut path = Vec::with_capacity(max_sample_count + 1);
+                path.push(self.position(target.entity) - self.position(target.parent));
+                (target.entity, path)
+            })
+            .collect::<Vec<_>>();
+
+        if max_sample_count == 0
+            || !sample_interval_years.is_finite()
+            || sample_interval_years <= 0.0
+        {
+            return forecast;
+        }
+
+        let mut simulation = self.clone();
+        simulation.accumulator_years = 0.0;
+        let mut trackers = self.create_moon_forecast_trackers();
+
+        for _ in 0..max_sample_count {
+            simulation.advance_years(sample_interval_years);
+
+            for ((target, (_, path)), tracker) in self
+                .moon_orbits
+                .iter()
+                .zip(forecast.iter_mut())
+                .zip(trackers.iter_mut())
+            {
+                if tracker.complete {
+                    continue;
+                }
+
+                let relative_position =
+                    simulation.position(target.entity) - simulation.position(target.parent);
+                let direction = projected_direction(
+                    relative_position,
+                    tracker.normal,
+                    tracker.previous_direction,
+                );
+                let delta_angle =
+                    signed_angle(tracker.previous_direction, direction, tracker.normal);
+
+                tracker.accumulated_angle += delta_angle.max(0.0);
+                tracker.previous_direction = direction;
+                path.push(relative_position);
+
+                if tracker.accumulated_angle >= TAU {
+                    tracker.complete = true;
+                }
+            }
+
+            if trackers.iter().all(|tracker| tracker.complete) {
+                break;
+            }
+        }
+
+        forecast
+    }
+
     fn step(&mut self, dt: f64) {
         let current_accelerations = self.accelerations();
         let half_dt_squared = 0.5 * dt * dt;
