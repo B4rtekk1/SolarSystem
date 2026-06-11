@@ -1,34 +1,37 @@
 mod camera;
 mod color;
 mod ecs;
+mod fps_overlay;
 mod nbody;
 mod orbit;
-mod fps_overlay;
 mod orbit_render;
 
 use std::{
     collections::VecDeque,
     f32::consts::{PI, TAU},
-    sync::{Arc},
+    sync::Arc,
     time::Instant,
 };
 
 use camera::Camera;
 use color::Color;
 use cosmic_text::{
-    Attrs, Buffer as TextBuffer, Color as TextColor, Family, FontSystem, Shaping,
-    SwashCache,
+    Attrs, Buffer as TextBuffer, Color as TextColor, Family, FontSystem, Shaping, SwashCache,
 };
 use ecs::{
     AtmosphereComponent, BodyComponent, CelestialKind, Entity, MaterialComponent, ObjectBundle,
     RenderComponent, RotationComponent, StarMaterial, SurfaceMaterial, World,
 };
 
+use egui_wgpu::{
+    Renderer as EguiRenderer, RendererOptions as EguiRendererOptions, ScreenDescriptor,
+};
+use egui_winit::State as EguiWinitState;
 use fps_overlay::*;
-use orbit_render::*;
 use glam::{DVec3, Mat4, Vec3};
 use nbody::{NBodyConfig, NBodySimulation};
 use orbit::Orbit as PlanetOrbit;
+use orbit_render::*;
 use wgpu::{Surface, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
@@ -59,6 +62,12 @@ const DEFAULT_CAMERA_DISTANCE: f32 = 8.5;
 const MAX_CAMERA_DISTANCE: f32 = 40.0;
 const MIN_ORBIT_WIDTH_SCALE: f32 = 0.45;
 const MAX_ORBIT_WIDTH_SCALE: f32 = 2.4;
+const MIN_SIMULATION_SPEED: f64 = 0.1;
+const MAX_SIMULATION_SPEED: f64 = 10.0;
+const DEFAULT_SIMULATION_SPEED: f64 = 1.0;
+const HIDE_ORBITS_SIMULATION_SPEED: f64 = 3.0;
+const CLICK_SELECTION_MAX_DRAG_PIXELS: f64 = 5.0;
+const AU_PER_YEAR_TO_KM_PER_SECOND: f64 = 4.740_470_463;
 const MSAA_SAMPLE_COUNT: u32 = 4;
 const EARTH_MASS_KG: f32 = 5.972e24;
 const LUNAR_MASS_KG: f32 = 7.342e22;
@@ -79,6 +88,54 @@ type TextOverlayVertex = [f32; 4];
 type CameraUniform = [f32; 20];
 type ObjectUniform = [f32; 32];
 type OrbitSegment = [f32; 16];
+
+fn alpha_blending_fragment_targets(
+    format: wgpu::TextureFormat,
+) -> [Option<wgpu::ColorTargetState>; 1] {
+    [Some(wgpu::ColorTargetState {
+        format,
+        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        write_mask: wgpu::ColorWrites::ALL,
+    })]
+}
+
+fn alpha_blending_fragment_state<'a>(
+    shader: &'a wgpu::ShaderModule,
+    targets: &'a [Option<wgpu::ColorTargetState>],
+) -> wgpu::FragmentState<'a> {
+    wgpu::FragmentState {
+        module: shader,
+        entry_point: Some("fs_main"),
+        targets,
+        compilation_options: Default::default(),
+    }
+}
+
+fn depth_stencil_state(
+    depth_write_enabled: bool,
+    depth_compare: wgpu::CompareFunction,
+) -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(depth_write_enabled),
+        depth_compare: Some(depth_compare),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+fn uniform_buffer_layout_entry(visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
 
 struct DepthTarget {
     _texture: wgpu::Texture,
@@ -111,6 +168,9 @@ struct State {
     orbit_vertex_count: u32,
     orbit_buffer: wgpu::Buffer,
     fps_overlay: FpsOverlay,
+    egui_ctx: egui::Context,
+    egui_winit: EguiWinitState,
+    egui_renderer: EguiRenderer,
     orbit_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -125,14 +185,17 @@ struct State {
     moon_orbit_offsets: Vec<(Entity, Vec<DVec3>)>,
     orbit_segments: Vec<OrbitSegment>,
     forecast_worker: OrbitForecastWorker,
-    start_time: Instant,
     last_physics_update: Instant,
+    rotation_time: f32,
     last_orbit_sample_year: f64,
     last_orbit_forecast_request: Instant,
     orbit_segments_dirty: bool,
     fps_frame_count: u32,
     fps_last_update: Instant,
     current_fps: f64,
+    simulation_speed: f64,
+    orbits_visible: bool,
+    selected_planet: Option<Entity>,
 }
 
 impl State {
@@ -199,16 +262,7 @@ impl State {
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Camera Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
+                entries: &[uniform_buffer_layout_entry(wgpu::ShaderStages::VERTEX)],
             });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -223,16 +277,9 @@ impl State {
         let object_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Object Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
+                entries: &[uniform_buffer_layout_entry(
+                    wgpu::ShaderStages::VERTEX_FRAGMENT,
+                )],
             });
 
         let orbit_bind_group_layout =
@@ -278,7 +325,7 @@ impl State {
 
         let mut object_gpu = Vec::with_capacity(world.entity_capacity());
         for entity in world.entities() {
-            let object_uniform = entity_object_uniform(&world, &physics, entity, 0.0);
+            let object_uniform = entity_object_uniform(&world, &physics, entity, 0.0, None);
             let object_name = world.name(entity);
             let object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("{object_name} Object Buffer")),
@@ -303,7 +350,7 @@ impl State {
         let orbit_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Orbit Storage Buffer"),
             size: max_orbit_segment_count(&world, physics.planet_entities().len()) as u64
-                * std::mem::size_of::<OrbitSegment>() as u64,
+                * size_of::<OrbitSegment>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -382,6 +429,7 @@ impl State {
                 immediate_size: 0,
             });
 
+        let orbit_fragment_targets = alpha_blending_fragment_targets(format);
         let orbit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Orbit Pipeline"),
             layout: Some(&orbit_pipeline_layout),
@@ -391,27 +439,15 @@ impl State {
                 buffers: &[],
                 compilation_options: Default::default(),
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &orbit_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
+            fragment: Some(alpha_blending_fragment_state(
+                &orbit_shader,
+                &orbit_fragment_targets,
+            )),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: Some(depth_stencil_state(false, wgpu::CompareFunction::LessEqual)),
             multisample: wgpu::MultisampleState {
                 count: MSAA_SAMPLE_COUNT,
                 ..Default::default()
@@ -442,6 +478,16 @@ impl State {
         );
         let msaa = create_msaa_target(&device, config.width, config.height, format);
         let depth = create_depth_target(&device, config.width, config.height);
+        let egui_ctx = egui::Context::default();
+        let egui_winit = EguiWinitState::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            window.as_ref(),
+            Some(window.scale_factor() as f32),
+            window.theme(),
+            Some(device.limits().max_texture_dimension_2d as usize),
+        );
+        let egui_renderer = EguiRenderer::new(&device, format, EguiRendererOptions::default());
         let forecast_worker = OrbitForecastWorker::new();
         let now = Instant::now();
 
@@ -461,6 +507,9 @@ impl State {
             orbit_vertex_count,
             orbit_buffer,
             fps_overlay,
+            egui_ctx,
+            egui_winit,
+            egui_renderer,
             orbit_bind_group,
             camera_buffer,
             camera_bind_group,
@@ -475,14 +524,17 @@ impl State {
             moon_orbit_offsets,
             orbit_segments,
             forecast_worker,
-            start_time: now,
             last_physics_update: now,
+            rotation_time: 0.0,
             last_orbit_sample_year: 0.0,
             last_orbit_forecast_request: now,
             orbit_segments_dirty: false,
             fps_frame_count: 0,
             fps_last_update: now,
             current_fps: 0.0,
+            simulation_speed: DEFAULT_SIMULATION_SPEED,
+            orbits_visible: true,
+            selected_planet: None,
         }
     }
 
@@ -509,6 +561,44 @@ impl State {
     fn zoom_camera(&mut self, scroll_delta: f32) {
         self.camera.zoom(scroll_delta);
         self.orbit_segments_dirty = true;
+    }
+
+    fn select_planet_at(&mut self, cursor: (f64, f64)) -> bool {
+        let selected_planet = self.pick_planet(cursor);
+        if self.selected_planet == selected_planet {
+            return false;
+        }
+
+        self.selected_planet = selected_planet;
+        true
+    }
+
+    fn pick_planet(&self, cursor: (f64, f64)) -> Option<Entity> {
+        let (ray_origin, ray_direction) = self.camera.screen_ray(
+            cursor.0 as f32,
+            cursor.1 as f32,
+            self.config.width,
+            self.config.height,
+        );
+        let mut closest = None;
+
+        for entity in self.world.entities_of_kind(CelestialKind::Planet) {
+            let center = dvec3_to_vec3(self.physics.position(entity));
+            let radius = (self.world.body(entity).radius * 1.45).max(0.08);
+            let Some(distance) = ray_sphere_distance(ray_origin, ray_direction, center, radius)
+            else {
+                continue;
+            };
+
+            if match closest {
+                Some((_, closest_distance)) => distance < closest_distance,
+                None => true,
+            } {
+                closest = Some((entity, distance));
+            }
+        }
+
+        closest.map(|(entity, _)| entity)
     }
 
     fn update_orbit_trails(&mut self) -> bool {
@@ -733,12 +823,81 @@ impl State {
         self.update_window_title();
     }
 
+    fn run_egui(
+        &mut self,
+    ) -> (
+        Vec<egui::ClippedPrimitive>,
+        egui::TexturesDelta,
+        ScreenDescriptor,
+    ) {
+        let raw_input = self.egui_winit.take_egui_input(&self.window);
+        let egui_ctx = self.egui_ctx.clone();
+        let mut simulation_speed = self.simulation_speed;
+        let mut orbits_visible = self.orbits_visible;
+        let selected_planet = self.selected_planet;
+
+        let full_output = egui_ctx.run_ui(raw_input, |ui| {
+            let window_frame = egui::Frame::window(ui.style().as_ref()).shadow(egui::Shadow::NONE);
+            egui::Window::new("Controls")
+                .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
+                .collapsible(false)
+                .resizable(false)
+                .frame(window_frame)
+                .show(ui.ctx(), |ui| {
+                    ui.add(
+                        egui::Slider::new(
+                            &mut simulation_speed,
+                            MIN_SIMULATION_SPEED..=MAX_SIMULATION_SPEED,
+                        )
+                        .text("Simulation Speed"),
+                    );
+                    ui.label(format!("{simulation_speed:.2}x"));
+                    let orbit_button_label = if orbits_visible {
+                        "Hide Orbits"
+                    } else {
+                        "Show Orbits"
+                    };
+                    if ui.button(orbit_button_label).clicked() {
+                        orbits_visible = !orbits_visible;
+                    }
+                });
+            show_selected_planet_window(ui.ctx(), &self.world, &self.physics, selected_planet);
+        });
+
+        self.simulation_speed = simulation_speed.clamp(MIN_SIMULATION_SPEED, MAX_SIMULATION_SPEED);
+        self.orbits_visible = orbits_visible;
+
+        let egui::FullOutput {
+            platform_output,
+            textures_delta,
+            shapes,
+            pixels_per_point,
+            ..
+        } = full_output;
+
+        self.egui_winit
+            .handle_platform_output(&self.window, platform_output);
+        let clipped_primitives = self.egui_ctx.tessellate(shapes, pixels_per_point);
+        let screen_descriptor = ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point,
+        };
+
+        (clipped_primitives, textures_delta, screen_descriptor)
+    }
+
     fn render(&mut self) {
         let now = Instant::now();
         let frame_seconds = now.duration_since(self.last_physics_update).as_secs_f64();
         self.last_physics_update = now;
-        self.physics.advance(frame_seconds);
+        let scaled_frame_seconds = frame_seconds * self.simulation_speed;
+        if scaled_frame_seconds.is_finite() && scaled_frame_seconds > 0.0 {
+            self.rotation_time += scaled_frame_seconds as f32;
+        }
+        self.physics
+            .advance_scaled(frame_seconds, self.simulation_speed);
         self.update_orbit_trails();
+        let (egui_primitives, egui_textures_delta, egui_screen_descriptor) = self.run_egui();
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -765,10 +924,14 @@ impl State {
         self.request_orbit_forecasts_if_needed(now);
         self.upload_orbit_segments();
 
-        let elapsed = self.start_time.elapsed().as_secs_f32();
         for object_gpu in &self.object_gpu {
-            let uniform =
-                entity_object_uniform(&self.world, &self.physics, object_gpu.entity, elapsed);
+            let uniform = entity_object_uniform(
+                &self.world,
+                &self.physics,
+                object_gpu.entity,
+                self.rotation_time,
+                self.selected_planet,
+            );
             self.queue.write_buffer(
                 &object_gpu.object_buffer,
                 0,
@@ -784,6 +947,17 @@ impl State {
         );
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        for (id, image_delta) in &egui_textures_delta.set {
+            self.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, image_delta);
+        }
+        let egui_command_buffers = self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &egui_primitives,
+            &egui_screen_descriptor,
+        );
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -829,10 +1003,12 @@ impl State {
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
             }
 
-            pass.set_pipeline(&self.orbit_pipeline);
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_bind_group(1, &self.orbit_bind_group, &[]);
-            pass.draw(0..self.orbit_vertex_count, 0..1);
+            if self.orbits_visible && self.simulation_speed < HIDE_ORBITS_SIMULATION_SPEED {
+                pass.set_pipeline(&self.orbit_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_bind_group(1, &self.orbit_bind_group, &[]);
+                pass.draw(0..self.orbit_vertex_count, 0..1);
+            }
 
             pass.set_pipeline(&self.planet_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -856,7 +1032,37 @@ impl State {
             }
         }
 
-        self.queue.submit(Some(encoder.finish()));
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Egui Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            let mut pass = pass.forget_lifetime();
+            self.egui_renderer
+                .render(&mut pass, &egui_primitives, &egui_screen_descriptor);
+        }
+
+        for id in &egui_textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+
+        self.queue.submit(
+            egui_command_buffers
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
         frame.present();
         self.update_fps_counter(Instant::now());
     }
@@ -867,6 +1073,9 @@ struct App {
     state: Option<State>,
     rotating_world: bool,
     panning_map: bool,
+    cursor_position: Option<(f64, f64)>,
+    left_press_cursor: Option<(f64, f64)>,
+    left_drag_moved: bool,
     last_cursor: Option<(f64, f64)>,
 }
 
@@ -895,6 +1104,11 @@ impl ApplicationHandler for App {
             return;
         };
 
+        let egui_response = state.egui_winit.on_window_event(&state.window, &event);
+        if egui_response.repaint {
+            state.window.request_redraw();
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
@@ -903,7 +1117,9 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && !event.repeat =>
+                if !egui_response.consumed
+                    && event.state == ElementState::Pressed
+                    && !event.repeat =>
             {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     if key == KeyCode::F11 {
@@ -914,7 +1130,7 @@ impl ApplicationHandler for App {
                 }
             }
 
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !egui_response.consumed => {
                 let scroll_delta = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(position) => position.y as f32 * 0.02,
@@ -927,7 +1143,7 @@ impl ApplicationHandler for App {
                 state: button_state,
                 button: MouseButton::Right,
                 ..
-            } => {
+            } if !egui_response.consumed => {
                 self.rotating_world = button_state == ElementState::Pressed;
                 self.last_cursor = None;
             }
@@ -937,17 +1153,67 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.panning_map = button_state == ElementState::Pressed;
+                if egui_response.consumed {
+                    if button_state == ElementState::Released {
+                        self.panning_map = false;
+                        self.left_press_cursor = None;
+                        self.left_drag_moved = false;
+                        self.last_cursor = None;
+                    }
+                } else {
+                    match button_state {
+                        ElementState::Pressed => {
+                            self.panning_map = true;
+                            self.left_press_cursor = self.cursor_position;
+                            self.left_drag_moved = false;
+                            self.last_cursor = self.cursor_position;
+                        }
+                        ElementState::Released => {
+                            let click_cursor = self.cursor_position.or(self.left_press_cursor);
+                            let should_select = !self.left_drag_moved;
+
+                            self.panning_map = false;
+                            self.left_press_cursor = None;
+                            self.left_drag_moved = false;
+                            self.last_cursor = None;
+
+                            if should_select {
+                                if let Some(cursor) = click_cursor {
+                                    if state.select_planet_at(cursor) {
+                                        state.window.request_redraw();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } if egui_response.consumed => {
+                self.cursor_position = Some((position.x, position.y));
                 self.last_cursor = None;
             }
 
             WindowEvent::CursorMoved { position, .. } => {
                 let current = (position.x, position.y);
-                if self.panning_map {
-                    if let Some((last_x, last_y)) = self.last_cursor {
-                        state.pan_camera(current.0 - last_x, current.1 - last_y);
+                self.cursor_position = Some(current);
+                if let Some((start_x, start_y)) = self.left_press_cursor {
+                    let delta_x = current.0 - start_x;
+                    let delta_y = current.1 - start_y;
+                    if delta_x * delta_x + delta_y * delta_y
+                        > CLICK_SELECTION_MAX_DRAG_PIXELS * CLICK_SELECTION_MAX_DRAG_PIXELS
+                    {
+                        self.left_drag_moved = true;
                     }
-                    state.window.request_redraw();
+                }
+
+                if self.panning_map {
+                    if self.left_drag_moved {
+                        if let Some((last_x, last_y)) = self.last_cursor {
+                            state.pan_camera(current.0 - last_x, current.1 - last_y);
+                            state.window.request_redraw();
+                        }
+                    }
                 } else if self.rotating_world {
                     if let Some((last_x, last_y)) = self.last_cursor {
                         state.orbit_camera(current.0 - last_x, current.1 - last_y);
@@ -975,6 +1241,8 @@ fn create_sphere_pipeline(
     sample_count: u32,
     label: &str,
 ) -> wgpu::RenderPipeline {
+    let fragment_targets = alpha_blending_fragment_targets(format);
+
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -982,30 +1250,15 @@ fn create_sphere_pipeline(
             module: shader,
             entry_point: Some("vs_main"),
             buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                array_stride: size_of::<Vertex>() as wgpu::BufferAddress,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &VERTEX_ATTRIBUTES,
             }],
             compilation_options: Default::default(),
         },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
+        fragment: Some(alpha_blending_fragment_state(shader, &fragment_targets)),
         primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
+        depth_stencil: Some(depth_stencil_state(true, wgpu::CompareFunction::Less)),
         multisample: wgpu::MultisampleState {
             count: sample_count,
             ..Default::default()
@@ -1028,6 +1281,8 @@ fn create_text_overlay_pipeline(
         immediate_size: 0,
     });
 
+    let fragment_targets = alpha_blending_fragment_targets(format);
+
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Text Overlay Pipeline"),
         layout: Some(&layout),
@@ -1035,33 +1290,18 @@ fn create_text_overlay_pipeline(
             module: shader,
             entry_point: Some("vs_main"),
             buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<TextOverlayVertex>() as wgpu::BufferAddress,
+                array_stride: size_of::<TextOverlayVertex>() as wgpu::BufferAddress,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &TEXT_OVERLAY_VERTEX_ATTRIBUTES,
             }],
             compilation_options: Default::default(),
         },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
+        fragment: Some(alpha_blending_fragment_state(shader, &fragment_targets)),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             ..Default::default()
         },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::Always),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
+        depth_stencil: Some(depth_stencil_state(false, wgpu::CompareFunction::Always)),
         multisample: wgpu::MultisampleState {
             count: sample_count,
             ..Default::default()
@@ -1223,14 +1463,14 @@ fn object_uniform(
     model: Mat4,
     base_color: [f32; 3],
     accent_color: [f32; 3],
-    emissive: f32,
+    emissive: [f32; 4],
     shader_params: [f32; 4],
 ) -> ObjectUniform {
     let mut uniform = [0.0; 32];
     uniform[..16].copy_from_slice(&model.to_cols_array());
     uniform[16..20].copy_from_slice(&[base_color[0], base_color[1], base_color[2], 1.0]);
     uniform[20..24].copy_from_slice(&[accent_color[0], accent_color[1], accent_color[2], 1.0]);
-    uniform[24..28].copy_from_slice(&[emissive, 0.0, 0.0, 0.0]);
+    uniform[24..28].copy_from_slice(&emissive);
     uniform[28..32].copy_from_slice(&shader_params);
     uniform
 }
@@ -1240,13 +1480,15 @@ fn entity_object_uniform(
     physics: &NBodySimulation,
     entity: Entity,
     shader_time: f32,
+    selected_planet: Option<Entity>,
 ) -> ObjectUniform {
     let body = world.body(entity);
     let rotation = world.rotation(entity);
     let render = world.render(entity);
     let position = dvec3_to_vec3(physics.position(entity));
+    let rotation_angle = (shader_time * rotation.speed).rem_euclid(TAU);
     let model = Mat4::from_translation(position)
-        * Mat4::from_rotation_y(shader_time * rotation.speed)
+        * Mat4::from_rotation_y(rotation_angle)
         * Mat4::from_scale(Vec3::splat(body.radius));
 
     match render.material {
@@ -1254,7 +1496,7 @@ fn entity_object_uniform(
             model,
             material.base_color.as_array(),
             material.accent_color.as_array(),
-            material.brightness,
+            [material.brightness, 0.0, 0.0, 0.0],
             [
                 ((material.surface_temperature - 2500.0) / 9500.0).clamp(0.0, 1.0),
                 1.35,
@@ -1269,11 +1511,12 @@ fn entity_object_uniform(
             let atmosphere_density = atmosphere.map_or(0.0, |atmosphere| {
                 atmosphere.density * atmosphere.radius_multiplier.max(0.0)
             });
+            let selection_emphasis = selection_emphasis(world, entity, selected_planet);
             object_uniform(
                 model,
                 material.base_color.as_array(),
                 accent_color.as_array(),
-                0.0,
+                [0.0, selection_emphasis, 0.0, 0.0],
                 [
                     material.roughness,
                     material.metallic,
@@ -1288,6 +1531,107 @@ fn entity_object_uniform(
 fn dvec3_to_vec3(position: DVec3) -> Vec3 {
     Vec3::new(position.x as f32, position.y as f32, position.z as f32)
 }
+
+fn selection_emphasis(world: &World, entity: Entity, selected_planet: Option<Entity>) -> f32 {
+    let Some(selected_planet) = selected_planet else {
+        return 0.0;
+    };
+
+    if entity == selected_planet {
+        return 0.45;
+    }
+
+    if world.kind(entity) == CelestialKind::Moon
+        && world
+            .parent(entity)
+            .is_some_and(|parent| parent.entity == selected_planet)
+    {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn ray_sphere_distance(origin: Vec3, direction: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+    let offset = origin - center;
+    let b = offset.dot(direction);
+    let c = offset.length_squared() - radius * radius;
+    let discriminant = b * b - c;
+    if discriminant < 0.0 {
+        return None;
+    }
+
+    let root = discriminant.sqrt();
+    let near = -b - root;
+    if near >= 0.0 {
+        return Some(near);
+    }
+
+    let far = -b + root;
+    if far >= 0.0 { Some(far) } else { None }
+}
+
+fn show_selected_planet_window(
+    ctx: &egui::Context,
+    world: &World,
+    physics: &NBodySimulation,
+    selected_planet: Option<Entity>,
+) {
+    let Some(planet) = selected_planet else {
+        return;
+    };
+
+    let body = world.body(planet);
+    let position = physics.position(planet);
+    let velocity = physics.velocity(planet);
+    let speed_au_per_year = velocity.length();
+    let speed_km_per_second = speed_au_per_year * AU_PER_YEAR_TO_KM_PER_SECOND;
+    let sun_distance = world
+        .first_entity_of_kind(CelestialKind::Star)
+        .map_or(position.length(), |sun| {
+            (position - physics.position(sun)).length()
+        });
+    let window_frame = egui::Frame::window(ctx.global_style().as_ref()).shadow(egui::Shadow::NONE);
+
+    egui::Window::new("Planet")
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+        .collapsible(false)
+        .resizable(false)
+        .frame(window_frame)
+        .show(ctx, |ui| {
+            ui.heading(world.name(planet));
+            ui.label(format!("Predkosc: {speed_km_per_second:.2} km/s"));
+            ui.label(format!("Predkosc orbitalna: {speed_au_per_year:.3} AU/rok"));
+            ui.label(format!("Odleglosc od gwiazdy: {sun_distance:.3} AU"));
+            ui.label(format!("Masa: {:.3e} kg", body.mass));
+            ui.label(format!("Promien: {:.3} AU", body.radius));
+            ui.label(format!(
+                "Pozycja: x {:.2}, y {:.2}, z {:.2}",
+                position.x, position.y, position.z
+            ));
+
+            ui.separator();
+            ui.label("Ksiezyce");
+            let mut moon_count = 0;
+            for moon in world.children_of_kind(planet, CelestialKind::Moon) {
+                moon_count += 1;
+                let moon_relative_speed =
+                    (physics.velocity(moon) - velocity).length() * AU_PER_YEAR_TO_KM_PER_SECOND;
+                let moon_distance = (physics.position(moon) - position).length();
+                ui.label(format!(
+                    "{}  {:.2} km/s  {:.3} AU",
+                    world.name(moon),
+                    moon_relative_speed,
+                    moon_distance
+                ));
+            }
+
+            if moon_count == 0 {
+                ui.label("Brak");
+            }
+        });
+}
+
 fn create_world() -> World {
     let mut world = World::default();
     let star = world.spawn(star_bundle());

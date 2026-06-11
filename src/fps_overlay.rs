@@ -1,5 +1,9 @@
-use cosmic_text::{FontSystem, Metrics, SwashCache, Buffer as TextBuffer};
-use crate::{build_fps_text_vertices, rasterize_google_sans_text, TextOverlayVertex, FPS_FONT_SIZE, FPS_LINE_HEIGHT, FPS_TEXT_TEXTURE_HEIGHT, FPS_TEXT_TEXTURE_WIDTH, GOOGLE_SANS_BYTES, TEXT_OVERLAY_MAX_VERTICES};
+use crate::{
+    FPS_FONT_SIZE, FPS_LINE_HEIGHT, FPS_TEXT_TEXTURE_HEIGHT, FPS_TEXT_TEXTURE_WIDTH,
+    GOOGLE_SANS_BYTES, TEXT_OVERLAY_MAX_VERTICES, TextOverlayVertex, build_fps_text_vertices,
+    rasterize_google_sans_text,
+};
+use cosmic_text::{Buffer as TextBuffer, FontSystem, Metrics, SwashCache};
 
 pub struct FpsOverlay {
     font_system: FontSystem,
@@ -109,7 +113,13 @@ impl FpsOverlay {
         overlay
     }
 
-    pub fn update(&mut self, queue: &wgpu::Queue, fps: f64, viewport_width: u32, viewport_height: u32) {
+    pub fn update(
+        &mut self,
+        queue: &wgpu::Queue,
+        fps: f64,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) {
         let text = format!("FPS {:.0}", fps);
         if self.last_text != text {
             let pixels = rasterize_google_sans_text(

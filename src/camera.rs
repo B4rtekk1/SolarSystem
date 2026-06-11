@@ -51,6 +51,31 @@ impl Camera {
             (-right * delta_x as f32 + up * delta_y as f32) * units_per_pixel * PAN_SPEED;
     }
 
+    pub fn screen_ray(&self, x: f32, y: f32, width: u32, height: u32) -> (Vec3, Vec3) {
+        let width = width.max(1) as f32;
+        let height = height.max(1) as f32;
+        let aspect = width / height;
+        let (yaw_sin, yaw_cos) = self.yaw.sin_cos();
+        let (pitch_sin, pitch_cos) = self.pitch.sin_cos();
+        let eye = self.target
+            + Vec3::new(
+                self.distance * pitch_cos * yaw_sin,
+                self.distance * pitch_sin,
+                self.distance * pitch_cos * yaw_cos,
+            );
+        let up = Vec3::new(-pitch_sin * yaw_sin, pitch_cos, -pitch_sin * yaw_cos);
+        let forward = (self.target - eye).normalize();
+        let right = forward.cross(up).normalize();
+        let ndc_x = x / width * 2.0 - 1.0;
+        let ndc_y = 1.0 - y / height * 2.0;
+        let half_fov_tan = (45.0_f32.to_radians() * 0.5).tan();
+        let direction =
+            (forward + right * ndc_x * aspect * half_fov_tan + up * ndc_y * half_fov_tan)
+                .normalize();
+
+        (eye, direction)
+    }
+
     pub fn view_projection(&self, width: u32, height: u32) -> CameraUniform {
         let aspect = width.max(1) as f32 / height.max(1) as f32;
         let (yaw_sin, yaw_cos) = self.yaw.sin_cos();

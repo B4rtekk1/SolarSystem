@@ -49,6 +49,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let metallic = clamp(object.params.y, 0.0, 1.0);
     let atmosphere_density = clamp(object.params.z, 0.0, 1.5);
     let time = object.params.w;
+    let highlight = clamp(object.emissive.y, 0.0, 1.0);
 
     let latitude_band = 0.5 + 0.5 * sin(in.local_pos.y * 18.0 + in.local_pos.x * 7.0 + time * 0.08);
     let land_noise = 0.5 + 0.5 * sin((in.local_pos.x * 1.9 + in.local_pos.z) * 22.0);
@@ -67,6 +68,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     let rim = pow(1.0 - max(dot(n, view_dir), 0.0), 2.2);
     let atmosphere = object.accent_color.rgb * rim * atmosphere_density * 0.32;
+    let lit_surface = surface_color * (ambient + diffuse * 0.88) + specular + atmosphere;
+    let highlight_color = mix(object.accent_color.rgb, vec3<f32>(1.0, 0.94, 0.58), 0.45);
+    let highlighted_surface = mix(lit_surface, lit_surface + highlight_color * (0.24 + rim * 1.15), highlight);
 
-    return vec4<f32>(surface_color * (ambient + diffuse * 0.88) + specular + atmosphere, 1.0);
+    return vec4<f32>(highlighted_surface, 1.0);
 }

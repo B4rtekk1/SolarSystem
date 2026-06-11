@@ -54,6 +54,8 @@ pub struct NBodySimulation {
     body_index_by_entity: Vec<Option<usize>>,
     planet_entities: Vec<Entity>,
     moon_orbits: Vec<MoonOrbitTarget>,
+    current_accelerations: Vec<DVec3>,
+    next_accelerations: Vec<DVec3>,
     config: NBodyConfig,
     accumulator_years: f64,
     elapsed_years: f64,
@@ -149,24 +151,32 @@ impl NBodySimulation {
             }
         }
 
+        let acceleration_buffer_len = bodies.len();
+
         Self {
             bodies,
             body_index_by_entity,
             planet_entities,
             moon_orbits,
+            current_accelerations: vec![DVec3::ZERO; acceleration_buffer_len],
+            next_accelerations: vec![DVec3::ZERO; acceleration_buffer_len],
             config,
             accumulator_years: 0.0,
             elapsed_years: 0.0,
         }
     }
 
-    pub fn advance(&mut self, real_seconds: f64) {
-        if !real_seconds.is_finite() || real_seconds <= 0.0 {
+    pub fn advance_scaled(&mut self, real_seconds: f64, time_scale: f64) {
+        if !real_seconds.is_finite()
+            || real_seconds <= 0.0
+            || !time_scale.is_finite()
+            || time_scale <= 0.0
+        {
             return;
         }
 
         self.accumulator_years +=
-            real_seconds.min(MAX_FRAME_SECONDS) * self.config.years_per_second;
+            real_seconds.min(MAX_FRAME_SECONDS) * self.config.years_per_second * time_scale;
 
         let mut steps = 0;
         while self.accumulator_years >= self.config.fixed_step_years && steps < MAX_STEPS_PER_FRAME
@@ -408,19 +418,32 @@ impl NBodySimulation {
     }
 
     fn step(&mut self, dt: f64) {
-        let current_accelerations = self.accelerations();
+        self.ensure_acceleration_buffers();
+        write_accelerations(
+            &self.bodies,
+            self.config.softening_length,
+            &mut self.current_accelerations,
+        );
         let half_dt_squared = 0.5 * dt * dt;
 
-        for (body, acceleration) in self.bodies.iter_mut().zip(current_accelerations.iter()) {
+        for (body, acceleration) in self
+            .bodies
+            .iter_mut()
+            .zip(self.current_accelerations.iter())
+        {
             body.position += body.velocity * dt + *acceleration * half_dt_squared;
         }
 
-        let next_accelerations = self.accelerations();
+        write_accelerations(
+            &self.bodies,
+            self.config.softening_length,
+            &mut self.next_accelerations,
+        );
         for ((body, current), next) in self
             .bodies
             .iter_mut()
-            .zip(current_accelerations.iter())
-            .zip(next_accelerations.iter())
+            .zip(self.current_accelerations.iter())
+            .zip(self.next_accelerations.iter())
         {
             body.velocity += (*current + *next) * (0.5 * dt);
         }
@@ -494,7 +517,7 @@ impl NBodySimulation {
             .collect()
     }
 
-    fn velocity(&self, entity: Entity) -> DVec3 {
+    pub fn velocity(&self, entity: Entity) -> DVec3 {
         self.body_index_by_entity
             .get(entity.index())
             .and_then(|body_index| *body_index)
@@ -502,24 +525,32 @@ impl NBodySimulation {
             .map_or(DVec3::ZERO, |body| body.velocity)
     }
 
-    fn accelerations(&self) -> Vec<DVec3> {
-        let mut accelerations = vec![DVec3::ZERO; self.bodies.len()];
-        let softening_squared = self.config.softening_length * self.config.softening_length;
-
-        for i in 0..self.bodies.len() {
-            for j in (i + 1)..self.bodies.len() {
-                let delta = self.bodies[j].position - self.bodies[i].position;
-                let distance_squared = delta.length_squared() + softening_squared;
-                let inverse_distance = distance_squared.sqrt().recip();
-                let inverse_distance_cubed = inverse_distance * inverse_distance * inverse_distance;
-                let acceleration_base = G_AU3_SOLAR_MASS_YEAR2 * delta * inverse_distance_cubed;
-
-                accelerations[i] += acceleration_base * self.bodies[j].mass;
-                accelerations[j] -= acceleration_base * self.bodies[i].mass;
-            }
+    fn ensure_acceleration_buffers(&mut self) {
+        let body_count = self.bodies.len();
+        if self.current_accelerations.len() != body_count {
+            self.current_accelerations.resize(body_count, DVec3::ZERO);
         }
+        if self.next_accelerations.len() != body_count {
+            self.next_accelerations.resize(body_count, DVec3::ZERO);
+        }
+    }
+}
 
-        accelerations
+fn write_accelerations(bodies: &[Body], softening_length: f64, accelerations: &mut [DVec3]) {
+    accelerations.fill(DVec3::ZERO);
+    let softening_squared = softening_length * softening_length;
+
+    for i in 0..bodies.len() {
+        for j in (i + 1)..bodies.len() {
+            let delta = bodies[j].position - bodies[i].position;
+            let distance_squared = delta.length_squared() + softening_squared;
+            let inverse_distance = distance_squared.sqrt().recip();
+            let inverse_distance_cubed = inverse_distance * inverse_distance * inverse_distance;
+            let acceleration_base = G_AU3_SOLAR_MASS_YEAR2 * delta * inverse_distance_cubed;
+
+            accelerations[i] += acceleration_base * bodies[j].mass;
+            accelerations[j] -= acceleration_base * bodies[i].mass;
+        }
     }
 }
 
@@ -638,6 +669,8 @@ mod tests {
             body_index_by_entity: Vec::new(),
             planet_entities: Vec::new(),
             moon_orbits: Vec::new(),
+            current_accelerations: vec![DVec3::ZERO; 2],
+            next_accelerations: vec![DVec3::ZERO; 2],
             config,
             accumulator_years: 0.0,
             elapsed_years: 0.0,
@@ -669,6 +702,8 @@ mod tests {
             body_index_by_entity: vec![Some(0), Some(1)],
             planet_entities: vec![planet],
             moon_orbits: Vec::new(),
+            current_accelerations: vec![DVec3::ZERO; 2],
+            next_accelerations: vec![DVec3::ZERO; 2],
             config: NBodyConfig {
                 years_per_second: 1.0,
                 fixed_step_years: 1.0 / 2048.0,

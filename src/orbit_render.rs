@@ -1,12 +1,17 @@
+use crate::camera::Camera;
+use crate::color::Color;
+use crate::ecs::{CelestialKind, Entity, World};
+use crate::nbody::NBodySimulation;
+use crate::{
+    DEFAULT_CAMERA_DISTANCE, MAX_ORBIT_WIDTH_SCALE, MIN_ORBIT_WIDTH_SCALE,
+    MOON_ORBIT_FORECAST_MAX_POINTS, MOON_ORBIT_FORECAST_SAMPLE_YEARS, MOON_ORBIT_HALF_WIDTH_PIXELS,
+    ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS, ORBIT_TRAIL_POINTS,
+    ORBIT_VERTICES_PER_SEGMENT, OrbitSegment, PLANET_ORBIT_HALF_WIDTH_PIXELS, dvec3_to_vec3,
+};
+use glam::{DVec3, Vec3};
 use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::thread;
-use glam::{DVec3, Vec3};
-use crate::ecs::{CelestialKind, Entity, World};
-use crate::nbody::NBodySimulation;
-use crate::{dvec3_to_vec3, OrbitSegment, DEFAULT_CAMERA_DISTANCE, MAX_ORBIT_WIDTH_SCALE, MIN_ORBIT_WIDTH_SCALE, MOON_ORBIT_FORECAST_MAX_POINTS, MOON_ORBIT_FORECAST_SAMPLE_YEARS, MOON_ORBIT_HALF_WIDTH_PIXELS, ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS, ORBIT_TRAIL_POINTS, ORBIT_VERTICES_PER_SEGMENT, PLANET_ORBIT_HALF_WIDTH_PIXELS};
-use crate::camera::Camera;
-use crate::color::Color;
 
 struct OrbitForecastRequest {
     physics: NBodySimulation,
@@ -172,10 +177,9 @@ pub fn build_orbit_segments(
         let Some(parent) = world.parent(*moon).map(|parent| parent.entity) else {
             continue;
         };
-        let ring_len = offsets.len().saturating_sub(1);
-        if ring_len < 2 {
+        if offsets.len() < 2 {
             continue;
-        };
+        }
 
         let color = orbit_color(world, *moon);
         let future_color = [
@@ -187,14 +191,18 @@ pub fn build_orbit_segments(
         let moon_position = dvec3_to_vec3(physics.position(*moon));
         let current_offset = moon_position - parent_position;
         let start_index = nearest_orbit_offset_index(offsets, current_offset);
+        let remaining_segments = offsets.len().saturating_sub(start_index + 1);
+        if remaining_segments == 0 {
+            continue;
+        }
+
         let mut previous = moon_position;
 
-        for segment_index in 1..=ring_len {
-            let age = segment_index as f32 / ring_len as f32;
+        for (segment_index, offset) in offsets.iter().skip(start_index + 1).enumerate() {
+            let age = (segment_index + 1) as f32 / remaining_segments as f32;
             let alpha = 0.36 * (1.0 - age).max(0.0) + 0.05;
             let vertex_color = [future_color[0], future_color[1], future_color[2], alpha];
-            let offset_index = (start_index + segment_index) % ring_len;
-            let current = parent_position + dvec3_to_vec3(offsets[offset_index]);
+            let current = parent_position + dvec3_to_vec3(*offset);
             segments.push(orbit_segment(
                 previous,
                 current,
@@ -206,7 +214,12 @@ pub fn build_orbit_segments(
     }
 }
 
-pub fn orbit_segment(start: Vec3, end: Vec3, color: [f32; 4], half_width_pixels: f32) -> OrbitSegment {
+pub fn orbit_segment(
+    start: Vec3,
+    end: Vec3,
+    color: [f32; 4],
+    half_width_pixels: f32,
+) -> OrbitSegment {
     [
         start.x,
         start.y,
@@ -264,8 +277,7 @@ pub fn create_orbit_trails(physics: &NBodySimulation) -> Vec<VecDeque<Vec3>> {
 }
 
 pub fn nearest_orbit_offset_index(offsets: &[DVec3], current_offset: Vec3) -> usize {
-    let ring_len = offsets.len().saturating_sub(1);
-    if ring_len == 0 {
+    if offsets.is_empty() {
         return 0;
     }
 
@@ -278,7 +290,7 @@ pub fn nearest_orbit_offset_index(offsets: &[DVec3], current_offset: Vec3) -> us
     let mut best_index = 0;
     let mut best_score = f32::NEG_INFINITY;
 
-    for (index, offset) in offsets.iter().take(ring_len).enumerate() {
+    for (index, offset) in offsets.iter().enumerate() {
         let offset = dvec3_to_vec3(*offset);
         let offset_length = offset.length();
         if offset_length <= f32::EPSILON {
@@ -293,4 +305,117 @@ pub fn nearest_orbit_offset_index(offsets: &[DVec3], current_offset: Vec3) -> us
     }
 
     best_index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        color::Color,
+        ecs::{
+            BodyComponent, CelestialKind, MaterialComponent, ObjectBundle, RenderComponent,
+            RotationComponent, StarMaterial, SurfaceMaterial, World,
+        },
+        nbody::NBodyConfig,
+        orbit::Orbit,
+    };
+
+    #[test]
+    fn moon_forecast_segments_do_not_wrap_to_the_start() {
+        let mut world = World::default();
+        let star = world.spawn(ObjectBundle {
+            name: "Star".to_string(),
+            kind: CelestialKind::Star,
+            parent: None,
+            body: BodyComponent::new(1.989e30, 1.0, None),
+            rotation: RotationComponent { speed: 0.0 },
+            render: RenderComponent {
+                material: MaterialComponent::Star(StarMaterial {
+                    base_color: Color::rgb(1.0, 0.8, 0.2),
+                    accent_color: Color::rgb(1.0, 1.0, 0.5),
+                    brightness: 1.0,
+                    surface_temperature: 5778.0,
+                }),
+            },
+            atmosphere: None,
+        });
+        let planet = world.spawn(test_surface_body(
+            "Planet",
+            CelestialKind::Planet,
+            Some(star),
+            5.972e24,
+            0.1,
+            Orbit::circular(1.0, 1.0),
+        ));
+        let moon = world.spawn(test_surface_body(
+            "Moon",
+            CelestialKind::Moon,
+            Some(planet),
+            7.342e22,
+            0.03,
+            Orbit::circular(0.3, 1.0),
+        ));
+        let physics = NBodySimulation::from_world(&world, NBodyConfig::default());
+        let parent_position = physics.position(planet);
+        let start_offset = physics.position(moon) - parent_position;
+        let offsets = vec![
+            start_offset,
+            start_offset + DVec3::new(0.0, 0.08, 0.03),
+            start_offset + DVec3::new(0.0, 0.16, 0.12),
+        ];
+        let moon_offsets = vec![(moon, offsets.clone())];
+        let mut segments = Vec::new();
+
+        build_orbit_segments(
+            &[],
+            &[],
+            &moon_offsets,
+            &world,
+            &physics,
+            &[],
+            1.0,
+            &mut segments,
+        );
+
+        assert_eq!(segments.len(), 2);
+        assert_vec3_near(
+            segment_end(segments.last().unwrap()),
+            parent_position + offsets[2],
+        );
+    }
+
+    fn test_surface_body(
+        name: &str,
+        kind: CelestialKind,
+        parent: Option<Entity>,
+        mass: f32,
+        radius: f32,
+        orbit: Orbit,
+    ) -> ObjectBundle {
+        ObjectBundle {
+            name: name.to_string(),
+            kind,
+            parent,
+            body: BodyComponent::new(mass, radius, Some(orbit)),
+            rotation: RotationComponent { speed: 0.0 },
+            render: RenderComponent {
+                material: MaterialComponent::Surface(SurfaceMaterial {
+                    base_color: Color::rgb(0.5, 0.5, 0.5),
+                    accent_color: Color::rgb(0.7, 0.7, 0.7),
+                    roughness: 0.8,
+                    metallic: 0.0,
+                }),
+            },
+            atmosphere: None,
+        }
+    }
+
+    fn segment_end(segment: &OrbitSegment) -> DVec3 {
+        DVec3::new(segment[4] as f64, segment[5] as f64, segment[6] as f64)
+    }
+
+    fn assert_vec3_near(actual: DVec3, expected: DVec3) {
+        let error = (actual - expected).length();
+        assert!(error < 1.0e-6, "expected {expected:?}, got {actual:?}");
+    }
 }
