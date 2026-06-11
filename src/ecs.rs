@@ -34,18 +34,29 @@ pub struct ParentComponent {
 #[derive(Debug, Clone, Copy)]
 pub struct BodyComponent {
     pub mass: f32,
-    pub radius: f32,
+    pub radius_km: f32,
+    pub render_radius: f32,
     pub orbit: Option<Orbit>,
 }
 
 impl BodyComponent {
-    pub fn new(mass: f32, radius: f32, orbit: Option<Orbit>) -> Self {
+    pub fn new(mass: f32, radius_km: f32, orbit: Option<Orbit>) -> Self {
         Self {
             mass,
-            radius,
+            radius_km,
+            render_radius: render_radius_from_km(radius_km),
             orbit,
         }
     }
+}
+
+fn render_radius_from_km(radius_km: f32) -> f32 {
+    const EARTH_RADIUS_KM: f32 = 6_371.0;
+    const MIN_RENDER_RADIUS: f32 = 0.018;
+    const EARTH_RENDER_RADIUS: f32 = 0.08;
+
+    let earth_radii = (radius_km / EARTH_RADIUS_KM).max(0.0);
+    MIN_RENDER_RADIUS + earth_radii.sqrt() * EARTH_RENDER_RADIUS
 }
 
 #[derive(Debug, Clone, Copy)]

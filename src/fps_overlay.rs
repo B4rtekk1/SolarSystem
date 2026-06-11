@@ -1,9 +1,8 @@
-use crate::{
-    FPS_FONT_SIZE, FPS_LINE_HEIGHT, FPS_TEXT_TEXTURE_HEIGHT, FPS_TEXT_TEXTURE_WIDTH,
-    GOOGLE_SANS_BYTES, TEXT_OVERLAY_MAX_VERTICES, TextOverlayVertex, build_fps_text_vertices,
-    rasterize_google_sans_text,
-};
-use cosmic_text::{Buffer as TextBuffer, FontSystem, Metrics, SwashCache};
+use crate::constants::{FPS_FONT_SIZE, FPS_LINE_HEIGHT, FPS_TEXT_TEXTURE_HEIGHT, FPS_TEXT_TEXTURE_WIDTH, GOOGLE_SANS_BYTES, TEXT_OVERLAY_MAX_VERTICES};
+use crate::pipeline::TextOverlayVertex;
+use cosmic_text::{Attrs, Buffer as TextBuffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache};
+
+use crate::constants::FPS_OVERLAY_MARGIN;
 
 pub struct FpsOverlay {
     font_system: FontSystem,
@@ -165,4 +164,101 @@ impl FpsOverlay {
             self.last_viewport_height = viewport_height;
         }
     }
+}
+
+fn rasterize_google_sans_text(
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    text_buffer: &mut TextBuffer,
+    font_family: &str,
+    text: &str,
+) -> Vec<u8> {
+    let mut pixels = vec![0; (FPS_TEXT_TEXTURE_WIDTH * FPS_TEXT_TEXTURE_HEIGHT * 4) as usize];
+    let attrs = Attrs::new().family(Family::Name(font_family));
+    text_buffer.set_text(font_system, text, &attrs, Shaping::Advanced, None);
+    text_buffer.shape_until_scroll(font_system, true);
+    text_buffer.draw(
+        font_system,
+        swash_cache,
+        TextColor::rgba(210, 245, 255, 255),
+        |x, y, width, height, color| {
+            let [red, green, blue, alpha] = color.as_rgba();
+            for row in 0..height as i32 {
+                for column in 0..width as i32 {
+                    let pixel_x = x + column;
+                    let pixel_y = y + row;
+                    if pixel_x < 0
+                        || pixel_y < 0
+                        || pixel_x >= FPS_TEXT_TEXTURE_WIDTH as i32
+                        || pixel_y >= FPS_TEXT_TEXTURE_HEIGHT as i32
+                    {
+                        continue;
+                    }
+
+                    let index =
+                        ((pixel_y as u32 * FPS_TEXT_TEXTURE_WIDTH + pixel_x as u32) * 4) as usize;
+                    pixels[index] = red;
+                    pixels[index + 1] = green;
+                    pixels[index + 2] = blue;
+                    pixels[index + 3] = alpha;
+                }
+            }
+        },
+    );
+
+    pixels
+}
+
+fn build_fps_text_vertices(viewport_width: u32, viewport_height: u32) -> Vec<TextOverlayVertex> {
+    let x = (viewport_width as f32 - FPS_TEXT_TEXTURE_WIDTH as f32 - FPS_OVERLAY_MARGIN).max(0.0);
+    let y = FPS_OVERLAY_MARGIN.min(
+        (viewport_height as f32 - FPS_TEXT_TEXTURE_HEIGHT as f32 - FPS_OVERLAY_MARGIN).max(0.0),
+    );
+    let mut vertices = Vec::with_capacity(TEXT_OVERLAY_MAX_VERTICES);
+    push_textured_screen_rect(
+        &mut vertices,
+        x,
+        y,
+        FPS_TEXT_TEXTURE_WIDTH as f32,
+        FPS_TEXT_TEXTURE_HEIGHT as f32,
+        viewport_width,
+        viewport_height,
+    );
+    vertices
+}
+
+fn push_textured_screen_rect(
+    vertices: &mut Vec<TextOverlayVertex>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+) {
+    let left = screen_x_to_clip(x, viewport_width);
+    let right = screen_x_to_clip(x + width, viewport_width);
+    let top = screen_y_to_clip(y, viewport_height);
+    let bottom = screen_y_to_clip(y + height, viewport_height);
+
+    vertices.extend_from_slice(&[
+        text_overlay_vertex(left, top, 0.0, 0.0),
+        text_overlay_vertex(left, bottom, 0.0, 1.0),
+        text_overlay_vertex(right, bottom, 1.0, 1.0),
+        text_overlay_vertex(left, top, 0.0, 0.0),
+        text_overlay_vertex(right, bottom, 1.0, 1.0),
+        text_overlay_vertex(right, top, 1.0, 0.0),
+    ]);
+}
+
+fn text_overlay_vertex(x: f32, y: f32, u: f32, v: f32) -> TextOverlayVertex {
+    [x, y, u, v]
+}
+
+fn screen_x_to_clip(x: f32, viewport_width: u32) -> f32 {
+    x / viewport_width.max(1) as f32 * 2.0 - 1.0
+}
+
+fn screen_y_to_clip(y: f32, viewport_height: u32) -> f32 {
+    1.0 - y / viewport_height.max(1) as f32 * 2.0
 }
