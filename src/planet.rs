@@ -1,4 +1,5 @@
 use crate::color::Color;
+use crate::moon::Moon;
 use crate::orbit::Orbit;
 
 #[derive(Debug, Clone)]
@@ -12,6 +13,7 @@ pub struct Planet {
     pub rotation_speed: f32,
     pub atmosphere: Option<Atmosphere>,
     pub temperature: f32,
+    pub moons: Vec<Moon>,
 }
 
 impl Planet {
@@ -26,6 +28,7 @@ impl Planet {
             rotation_speed: 0.0,
             atmosphere: None,
             temperature: 288.0,
+            moons: Vec::new(),
         }
     }
 
@@ -36,6 +39,11 @@ impl Planet {
 
     pub fn with_atmosphere(mut self, atmosphere: Atmosphere) -> Self {
         self.atmosphere = Some(atmosphere);
+        self
+    }
+
+    pub fn with_moons(mut self, moons: Vec<Moon>) -> Self {
+        self.moons = moons;
         self
     }
 

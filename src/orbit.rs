@@ -24,21 +24,6 @@ impl Orbit {
         }
     }
 
-    pub fn eccentricity(&self) -> f32 {
-        if self.semi_major_axis <= 0.0 {
-            return 0.0;
-        }
-
-        let minor_major_ratio = self.semi_minor_axis / self.semi_major_axis;
-        (1.0 - minor_major_ratio * minor_major_ratio)
-            .max(0.0)
-            .sqrt()
-    }
-
-    pub fn position_at(&self, time: f32) -> [f32; 3] {
-        self.position_at_angle(self.phase + self.angular_speed * time)
-    }
-
     pub fn position_at_angle(&self, angle: f32) -> [f32; 3] {
         let (sin_angle, cos_angle) = angle.sin_cos();
         let (sin_inclination, cos_inclination) = self.inclination.sin_cos();
