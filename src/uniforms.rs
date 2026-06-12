@@ -2,7 +2,7 @@ use std::f32::consts::TAU;
 use glam::{DVec3, Mat4, Vec3};
 use crate::ecs::{CelestialKind, Entity, MaterialComponent, World};
 use crate::nbody::NBodySimulation;
-use crate::constants::{SELECTION_DIMMED_BRIGHTNESS, SELECTION_FOCUS_BRIGHTNESS};
+use crate::constants::SELECTION_FOCUS_BRIGHTNESS;
 
 pub type ObjectUniform = [f32; 32];
 
@@ -113,7 +113,7 @@ pub fn selection_brightness(world: &World, entity: Entity, selected_planet: Opti
     if is_selection_focus(world, entity, selected_planet) {
         SELECTION_FOCUS_BRIGHTNESS
     } else {
-        SELECTION_DIMMED_BRIGHTNESS
+        1.0
     }
 }
 

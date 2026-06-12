@@ -44,7 +44,6 @@ pub const FPS_FONT_SIZE: f32 = 23.0;
 pub const FPS_LINE_HEIGHT: f32 = 32.0;
 pub const FPS_OVERLAY_MARGIN: f32 = 6.0;
 pub const SELECTION_FOCUS_BRIGHTNESS: f32 = 1.14;
-pub const SELECTION_DIMMED_BRIGHTNESS: f32 = 0.42;
 pub const GOOGLE_SANS_BYTES: &[u8] =
     include_bytes!("../assets/Google_Sans/GoogleSans-VariableFont_GRAD,opsz,wght.ttf");
 

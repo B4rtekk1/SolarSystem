@@ -17,7 +17,7 @@ use crate::constants::{DEFAULT_SIMULATION_SPEED, HIDE_ORBITS_SIMULATION_SPEED, M
                        ORBIT_TRAIL_POINTS, ORBIT_TRAIL_SAMPLE_YEARS, OrbitSegment, SPHERE_LATITUDES, SPHERE_LONGITUDES};
 use crate::geometry::create_sphere;
 use crate::orbit_render::{build_orbit_segments, create_orbit_trails, max_orbit_segment_count, orbit_draw_vertex_count, orbit_width_scale, OrbitForecastWorker};
-use crate::pipeline::{create_sphere_pipeline, create_text_overlay_pipeline};
+use crate::pipeline::{create_screen_dim_pipeline, create_sphere_focus_pipeline, create_sphere_pipeline, create_text_overlay_pipeline};
 use crate::render_utils::{alpha_blending_fragment_state, alpha_blending_fragment_targets, create_depth_target, create_msaa_target, depth_stencil_state, DepthTarget, MsaaTarget, uniform_buffer_layout_entry};
 use crate::scene::create_world;
 use crate::uniforms::{dvec3_to_vec3, entity_object_uniform, ray_sphere_distance};
@@ -37,7 +37,9 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     sun_pipeline: wgpu::RenderPipeline,
     planet_pipeline: wgpu::RenderPipeline,
+    planet_focus_pipeline: wgpu::RenderPipeline,
     orbit_pipeline: wgpu::RenderPipeline,
+    screen_dim_pipeline: wgpu::RenderPipeline,
     text_overlay_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -126,6 +128,10 @@ impl State {
         let text_overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Text Overlay Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/text_overlay.wgsl").into()),
+        });
+        let screen_dim_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Screen Dim Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/screen_dim.wgsl").into()),
         });
 
         let camera = Camera::default();
@@ -288,6 +294,16 @@ impl State {
             MSAA_SAMPLE_COUNT,
             "Planet Pipeline",
         );
+        let planet_focus_pipeline = create_sphere_focus_pipeline(
+            &device,
+            format,
+            &pipeline_layout,
+            &planet_shader,
+            MSAA_SAMPLE_COUNT,
+            "Planet Focus Pipeline",
+        );
+        let screen_dim_pipeline =
+            create_screen_dim_pipeline(&device, format, &screen_dim_shader, MSAA_SAMPLE_COUNT);
         let text_overlay_pipeline = create_text_overlay_pipeline(
             &device,
             format,
@@ -376,7 +392,9 @@ impl State {
             config,
             sun_pipeline,
             planet_pipeline,
+            planet_focus_pipeline,
             orbit_pipeline,
+            screen_dim_pipeline,
             text_overlay_pipeline,
             vertex_buffer,
             index_buffer,
@@ -899,6 +917,27 @@ impl State {
             }) {
                 pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
+
+            if let Some(selected_planet) = self.selected_planet {
+                pass.set_pipeline(&self.screen_dim_pipeline);
+                pass.draw(0..3, 0..1);
+
+                pass.set_pipeline(&self.planet_focus_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                for object_gpu in self.object_gpu.iter().filter(|object| {
+                    object.entity == selected_planet
+                        || (self.world.kind(object.entity) == CelestialKind::Moon
+                            && self
+                                .world
+                                .parent(object.entity)
+                                .is_some_and(|parent| parent.entity == selected_planet))
+                }) {
+                    pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
+                    pass.draw_indexed(0..self.index_count, 0, 0..1);
+                }
             }
 
             if self.fps_overlay.text_vertex_count > 0 {

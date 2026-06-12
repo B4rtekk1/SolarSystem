@@ -9,7 +9,7 @@ pub fn au_to_km(au: f64) -> f64 {
 pub fn format_km(km: f64) -> String {
     let absolute_km = km.abs();
     if absolute_km >= 1_000_000.0 {
-        format!("{:.2} mln km", km / 1_000_000.0)
+        format!("{:.2} M km", km / 1_000_000.0)
     } else if absolute_km >= 10_000.0 {
         format!("{km:.0} km")
     } else {
@@ -47,24 +47,24 @@ pub fn show_selected_planet_window(
         .frame(window_frame)
         .show(ctx, |ui| {
             ui.heading(world.name(planet));
-            ui.label(format!("Predkosc: {speed_km_per_second:.2} km/s"));
-            ui.label(format!("Predkosc orbitalna: {speed_au_per_year:.3} AU/rok"));
+            ui.label(format!("Velocity: {speed_km_per_second:.2} km/s"));
+            ui.label(format!("Orbital speed: {speed_au_per_year:.3} AU/year"));
             ui.label(format!(
-                "Odleglosc od gwiazdy: {sun_distance:.3} AU ({})",
+                "Distance from the star: {sun_distance:.3} AU ({})",
                 format_km(au_to_km(sun_distance))
             ));
             ui.label(format!("Masa: {:.3e} kg", body.mass));
             ui.label(format!(
-                "Promien: {} ({radius_au:.8} AU)",
+                "Radius: {} ({radius_au:.8} AU)",
                 format_km(body.radius_km as f64)
             ));
             ui.label(format!(
-                "Pozycja: x {:.2} AU, y {:.2} AU, z {:.2} AU",
+                "Position: x {:.2} AU, y {:.2} AU, z {:.2} AU",
                 position.x, position.y, position.z
             ));
 
             ui.separator();
-            ui.label("Ksiezyce");
+            ui.label("Moons");
             let mut moon_count = 0;
             for moon in world.children_of_kind(planet, CelestialKind::Moon) {
                 moon_count += 1;
@@ -81,7 +81,7 @@ pub fn show_selected_planet_window(
             }
 
             if moon_count == 0 {
-                ui.label("Brak");
+                ui.label("None");
             }
         });
 }

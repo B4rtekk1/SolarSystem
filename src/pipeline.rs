@@ -1,5 +1,7 @@
 use crate::constants::{TEXT_OVERLAY_VERTEX_ATTRIBUTES, VERTEX_ATTRIBUTES};
-use crate::render_utils::{alpha_blending_fragment_state, alpha_blending_fragment_targets, depth_stencil_state};
+use crate::render_utils::{
+    alpha_blending_fragment_state, alpha_blending_fragment_targets, depth_stencil_state,
+};
 
 pub type TextOverlayVertex = [f32; 4];
 pub type Vertex = [f32; 3];
@@ -11,6 +13,48 @@ pub fn create_sphere_pipeline(
     shader: &wgpu::ShaderModule,
     sample_count: u32,
     label: &str,
+) -> wgpu::RenderPipeline {
+    create_sphere_pipeline_with_depth(
+        device,
+        format,
+        layout,
+        shader,
+        sample_count,
+        label,
+        true,
+        wgpu::CompareFunction::Less,
+    )
+}
+
+pub fn create_sphere_focus_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    sample_count: u32,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    create_sphere_pipeline_with_depth(
+        device,
+        format,
+        layout,
+        shader,
+        sample_count,
+        label,
+        false,
+        wgpu::CompareFunction::LessEqual,
+    )
+}
+
+fn create_sphere_pipeline_with_depth(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    sample_count: u32,
+    label: &str,
+    depth_write_enabled: bool,
+    depth_compare: wgpu::CompareFunction,
 ) -> wgpu::RenderPipeline {
     let fragment_targets = alpha_blending_fragment_targets(format);
 
@@ -29,7 +73,7 @@ pub fn create_sphere_pipeline(
         },
         fragment: Some(alpha_blending_fragment_state(shader, &fragment_targets)),
         primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: Some(depth_stencil_state(true, wgpu::CompareFunction::Less)),
+        depth_stencil: Some(depth_stencil_state(depth_write_enabled, depth_compare)),
         multisample: wgpu::MultisampleState {
             count: sample_count,
             ..Default::default()
@@ -65,6 +109,44 @@ pub fn create_text_overlay_pipeline(
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &TEXT_OVERLAY_VERTEX_ATTRIBUTES,
             }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(alpha_blending_fragment_state(shader, &fragment_targets)),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(depth_stencil_state(false, wgpu::CompareFunction::Always)),
+        multisample: wgpu::MultisampleState {
+            count: sample_count,
+            ..Default::default()
+        },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+pub fn create_screen_dim_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    shader: &wgpu::ShaderModule,
+    sample_count: u32,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Screen Dim Pipeline Layout"),
+        bind_group_layouts: &[],
+        immediate_size: 0,
+    });
+
+    let fragment_targets = alpha_blending_fragment_targets(format);
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Screen Dim Pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(alpha_blending_fragment_state(shader, &fragment_targets)),

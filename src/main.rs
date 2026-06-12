@@ -15,11 +15,7 @@ mod uniforms;
 mod utils;
 mod state;
 mod sun;
-
-use wgpu::{Surface, util::DeviceExt};
-use winit::{
-    application::ApplicationHandler,
-    event_loop::{EventLoop},
+use winit::{event_loop::{EventLoop},
 };
 use app::App;
 
