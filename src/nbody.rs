@@ -5,8 +5,13 @@ use crate::{
 use glam::DVec3;
 use std::f64::consts::TAU;
 
+const GRAVITATIONAL_CONSTANT_M3_KG_S2: f64 = 6.674_30e-11;
 const SOLAR_MASS_KG: f64 = 1.988_47e30;
-const G_AU3_SOLAR_MASS_YEAR2: f64 = 39.478_417_604_357_43;
+const ASTRONOMICAL_UNIT_METERS: f64 = 149_597_870_700.0;
+const JULIAN_YEAR_SECONDS: f64 = 31_557_600.0;
+const GRAVITATIONAL_CONSTANT_AU3_SOLAR_MASS_YEAR2: f64 =
+    GRAVITATIONAL_CONSTANT_M3_KG_S2 * SOLAR_MASS_KG * JULIAN_YEAR_SECONDS * JULIAN_YEAR_SECONDS
+        / (ASTRONOMICAL_UNIT_METERS * ASTRONOMICAL_UNIT_METERS * ASTRONOMICAL_UNIT_METERS);
 const MAX_FRAME_SECONDS: f64 = 0.1;
 const MAX_STEPS_PER_FRAME: usize = 96;
 
@@ -22,7 +27,7 @@ impl Default for NBodyConfig {
         Self {
             years_per_second: 0.22,
             fixed_step_years: 1.0 / 720.0,
-            softening_length: 0.03,
+            softening_length: 0.0,
         }
     }
 }
@@ -75,7 +80,7 @@ impl NBodySimulation {
                 entity,
                 body.mass,
                 body.orbit
-                    .map_or(DVec3::ZERO, |orbit| orbit_position(&orbit)),
+                    .map_or(DVec3::ZERO, |orbit| initial_orbit_state(&orbit, 0.0, 0.0).0),
                 DVec3::ZERO,
             )
         });
@@ -91,12 +96,11 @@ impl NBodySimulation {
                 .iter()
                 .map(|entity| kg_to_solar_masses(world.body(*entity).mass as f64))
                 .sum::<f64>();
-            let position = planet_body
+            let (position, velocity) = planet_body
                 .orbit
-                .map_or(DVec3::ZERO, |orbit| orbit_position(&orbit));
-            let velocity = planet_body.orbit.map_or(DVec3::ZERO, |orbit| {
-                initial_orbital_velocity(&orbit, position, star_mass, planet_mass + moon_mass_sum)
-            });
+                .map_or((DVec3::ZERO, DVec3::ZERO), |orbit| {
+                    initial_orbit_state(&orbit, star_mass, planet_mass + moon_mass_sum)
+                });
             let planet_body_index = bodies.len();
             push_body(
                 &mut bodies,
@@ -111,12 +115,10 @@ impl NBodySimulation {
             for moon_entity in &moon_entities {
                 let moon_body = world.body(*moon_entity);
                 let moon_mass = kg_to_solar_masses(moon_body.mass as f64);
-                let moon_offset = moon_body
-                    .orbit
-                    .map_or(DVec3::ZERO, |orbit| orbit_position(&orbit));
-                let moon_relative_velocity = moon_body.orbit.map_or(DVec3::ZERO, |orbit| {
-                    initial_orbital_velocity(&orbit, moon_offset, planet_mass, moon_mass)
-                });
+                let (moon_offset, moon_relative_velocity) =
+                    moon_body.orbit.map_or((DVec3::ZERO, DVec3::ZERO), |orbit| {
+                        initial_orbit_state(&orbit, planet_mass, moon_mass)
+                    });
 
                 if planet_mass > f64::EPSILON {
                     parent_velocity_offset -= moon_relative_velocity * (moon_mass / planet_mass);
@@ -206,6 +208,26 @@ impl NBodySimulation {
             .and_then(|body_index| *body_index)
             .and_then(|body_index| self.bodies.get(body_index))
             .map_or(DVec3::ZERO, |body| body.position)
+    }
+
+    pub fn render_position(&self, entity: Entity) -> DVec3 {
+        let extrapolation_years = if self.accumulator_years.is_finite()
+            && self.config.fixed_step_years.is_finite()
+            && self.config.fixed_step_years > 0.0
+        {
+            self.accumulator_years
+                .clamp(0.0, self.config.fixed_step_years)
+        } else {
+            0.0
+        };
+
+        self.body_index_by_entity
+            .get(entity.index())
+            .and_then(|body_index| *body_index)
+            .and_then(|body_index| self.bodies.get(body_index))
+            .map_or(DVec3::ZERO, |body| {
+                body.position + body.velocity * extrapolation_years
+            })
     }
 
     pub fn sun_position(&self) -> DVec3 {
@@ -538,15 +560,23 @@ impl NBodySimulation {
 
 fn write_accelerations(bodies: &[Body], softening_length: f64, accelerations: &mut [DVec3]) {
     accelerations.fill(DVec3::ZERO);
-    let softening_squared = softening_length * softening_length;
+    let softening_squared = if softening_length.is_finite() && softening_length > 0.0 {
+        softening_length * softening_length
+    } else {
+        0.0
+    };
 
     for i in 0..bodies.len() {
         for j in (i + 1)..bodies.len() {
             let delta = bodies[j].position - bodies[i].position;
             let distance_squared = delta.length_squared() + softening_squared;
+            if distance_squared <= f64::EPSILON {
+                continue;
+            }
             let inverse_distance = distance_squared.sqrt().recip();
             let inverse_distance_cubed = inverse_distance * inverse_distance * inverse_distance;
-            let acceleration_base = G_AU3_SOLAR_MASS_YEAR2 * delta * inverse_distance_cubed;
+            let acceleration_base =
+                GRAVITATIONAL_CONSTANT_AU3_SOLAR_MASS_YEAR2 * delta * inverse_distance_cubed;
 
             accelerations[i] += acceleration_base * bodies[j].mass;
             accelerations[j] -= acceleration_base * bodies[i].mass;
@@ -579,40 +609,50 @@ fn kg_to_solar_masses(kg: f64) -> f64 {
     kg / SOLAR_MASS_KG
 }
 
-fn orbit_position(orbit: &Orbit) -> DVec3 {
-    let [x, y, z] = orbit.position_at_angle(orbit.phase);
-    DVec3::new(x as f64, y as f64, z as f64)
-}
+fn initial_orbit_state(orbit: &Orbit, central_mass: f64, body_mass: f64) -> (DVec3, DVec3) {
+    let semi_major_axis = (orbit.semi_major_axis as f64).abs().max(1.0e-9);
+    let semi_minor_axis = (orbit.semi_minor_axis as f64)
+        .abs()
+        .clamp(1.0e-9, semi_major_axis);
+    let eccentricity_squared = (1.0
+        - semi_minor_axis * semi_minor_axis / (semi_major_axis * semi_major_axis))
+        .clamp(0.0, 1.0);
+    let eccentricity = eccentricity_squared.sqrt();
+    let semi_latus_rectum = semi_major_axis * (1.0 - eccentricity_squared);
+    let true_anomaly = orbit.phase as f64;
+    let (sin_anomaly, cos_anomaly) = true_anomaly.sin_cos();
+    let radius = semi_latus_rectum / (1.0 + eccentricity * cos_anomaly).max(1.0e-9);
+    let position = orbit_position_from_plane(orbit, radius * cos_anomaly, radius * sin_anomaly);
 
-fn initial_orbital_velocity(
-    orbit: &Orbit,
-    position: DVec3,
-    central_mass: f64,
-    body_mass: f64,
-) -> DVec3 {
-    let angle = orbit.phase as f64;
-    let (sin_angle, cos_angle) = angle.sin_cos();
-    let (sin_inclination, cos_inclination) = (orbit.inclination as f64).sin_cos();
-    let tangent = DVec3::new(
-        -(orbit.semi_major_axis as f64) * sin_angle,
-        -(orbit.semi_minor_axis as f64) * cos_angle * sin_inclination,
-        (orbit.semi_minor_axis as f64) * cos_angle * cos_inclination,
-    );
-    let tangent_length = tangent.length();
-    let direction = if tangent_length > f64::EPSILON {
-        tangent / tangent_length
+    let standard_gravitational_parameter =
+        GRAVITATIONAL_CONSTANT_AU3_SOLAR_MASS_YEAR2 * (central_mass + body_mass);
+    let velocity = if standard_gravitational_parameter > 0.0 && semi_latus_rectum > 1.0e-12 {
+        let speed_scale = (standard_gravitational_parameter / semi_latus_rectum).sqrt();
+        let radial_speed = speed_scale * eccentricity * sin_anomaly;
+        let tangential_speed = speed_scale * (1.0 + eccentricity * cos_anomaly);
+        let velocity_x = radial_speed * cos_anomaly - tangential_speed * sin_anomaly;
+        let velocity_z = radial_speed * sin_anomaly + tangential_speed * cos_anomaly;
+        let orbit_direction = if orbit.angular_speed < 0.0 { -1.0 } else { 1.0 };
+
+        orbit_vector_from_plane(orbit, velocity_x, velocity_z) * orbit_direction
     } else {
-        DVec3::Z
+        DVec3::ZERO
     };
 
-    let radius = position.length().max(1.0e-6);
-    let semi_major_axis = (orbit.semi_major_axis as f64).max(radius);
-    let speed_squared = G_AU3_SOLAR_MASS_YEAR2
-        * (central_mass + body_mass)
-        * (2.0 / radius - 1.0 / semi_major_axis);
-    let orbit_direction = if orbit.angular_speed < 0.0 { -1.0 } else { 1.0 };
+    (position, velocity)
+}
 
-    direction * speed_squared.max(0.0).sqrt() * orbit_direction
+fn orbit_position_from_plane(orbit: &Orbit, x: f64, z: f64) -> DVec3 {
+    DVec3::new(
+        orbit.center[0] as f64,
+        orbit.center[1] as f64,
+        orbit.center[2] as f64,
+    ) + orbit_vector_from_plane(orbit, x, z)
+}
+
+fn orbit_vector_from_plane(orbit: &Orbit, x: f64, z: f64) -> DVec3 {
+    let (sin_inclination, cos_inclination) = (orbit.inclination as f64).sin_cos();
+    DVec3::new(x, -z * sin_inclination, z * cos_inclination)
 }
 
 fn projected_direction(vector: DVec3, normal: DVec3, fallback: DVec3) -> DVec3 {
@@ -681,6 +721,83 @@ mod tests {
 
         let momentum_error = (total_momentum(&simulation.bodies) - initial_momentum).length();
         assert!(momentum_error < 1.0e-12);
+    }
+
+    #[test]
+    fn default_config_uses_unsoftened_gravity() {
+        assert_eq!(NBodyConfig::default().softening_length, 0.0);
+    }
+
+    #[test]
+    fn acceleration_uses_newton_inverse_square_law() {
+        let bodies = vec![
+            Body {
+                mass: 1.0,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+            },
+            Body {
+                mass: 0.001,
+                position: DVec3::X,
+                velocity: DVec3::ZERO,
+            },
+        ];
+        let mut accelerations = vec![DVec3::ZERO; 2];
+
+        write_accelerations(&bodies, 0.0, &mut accelerations);
+
+        assert!(
+            (accelerations[0].x - GRAVITATIONAL_CONSTANT_AU3_SOLAR_MASS_YEAR2 * 0.001).abs()
+                < 1.0e-12
+        );
+        assert!(accelerations[0].y.abs() < 1.0e-12);
+        assert!(accelerations[0].z.abs() < 1.0e-12);
+        assert!((accelerations[1].x + GRAVITATIONAL_CONSTANT_AU3_SOLAR_MASS_YEAR2).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn elliptical_initial_state_places_central_mass_at_focus() {
+        let orbit = Orbit::elliptical(2.0, 3.0_f32.sqrt(), 1.0);
+
+        let (position, velocity) = initial_orbit_state(&orbit, 1.0, 0.0);
+
+        assert!((position.x - 1.0).abs() < 1.0e-6);
+        assert!(position.y.abs() < 1.0e-12);
+        assert!(position.z.abs() < 1.0e-12);
+        assert!(velocity.x.abs() < 1.0e-12);
+        assert!(
+            (velocity.z - (GRAVITATIONAL_CONSTANT_AU3_SOLAR_MASS_YEAR2 * 1.5).sqrt()).abs()
+                < 1.0e-6
+        );
+    }
+
+    #[test]
+    fn render_position_uses_unstepped_accumulator() {
+        let entity = Entity::from_index(0);
+        let mut simulation = NBodySimulation {
+            bodies: vec![Body {
+                mass: 1.0,
+                position: DVec3::ZERO,
+                velocity: DVec3::new(2.0, 0.0, 0.0),
+            }],
+            body_index_by_entity: vec![Some(0)],
+            planet_entities: vec![entity],
+            moon_orbits: Vec::new(),
+            current_accelerations: vec![DVec3::ZERO],
+            next_accelerations: vec![DVec3::ZERO],
+            config: NBodyConfig {
+                years_per_second: 1.0,
+                fixed_step_years: 1.0,
+                softening_length: 0.0,
+            },
+            accumulator_years: 0.0,
+            elapsed_years: 0.0,
+        };
+
+        simulation.advance_scaled(0.05, 1.0);
+
+        assert_eq!(simulation.position(entity), DVec3::ZERO);
+        assert!((simulation.render_position(entity).x - 0.1).abs() < 1.0e-12);
     }
 
     #[test]

@@ -1,11 +1,11 @@
+use crate::constants::CLICK_SELECTION_MAX_DRAG_PIXELS;
+use crate::state::State;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowAttributes;
-use crate::constants::CLICK_SELECTION_MAX_DRAG_PIXELS;
-use crate::state::State;
 
 #[derive(Default)]
 pub struct App {
@@ -56,18 +56,18 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. }
-            if !egui_response.consumed
-                && event.state == ElementState::Pressed
-                && !event.repeat =>
-                {
-                    if let PhysicalKey::Code(key) = event.physical_key {
-                        if key == KeyCode::F11 {
-                            state.toggle_borderless_fullscreen();
-                        } else if state.handle_shader_key(key) {
-                            state.window.request_redraw();
-                        }
+                if !egui_response.consumed
+                    && event.state == ElementState::Pressed
+                    && !event.repeat =>
+            {
+                if let PhysicalKey::Code(key) = event.physical_key {
+                    if key == KeyCode::F11 {
+                        state.toggle_borderless_fullscreen();
+                    } else if state.handle_shader_key(key) {
+                        state.window.request_redraw();
                     }
                 }
+            }
 
             WindowEvent::MouseWheel { delta, .. } if !egui_response.consumed => {
                 let scroll_delta = match delta {

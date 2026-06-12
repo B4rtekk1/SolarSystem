@@ -1,4 +1,7 @@
-use crate::constants::{CameraUniform, DEFAULT_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE, MIN_CAMERA_DISTANCE, ORBIT_SPEED, PAN_SPEED, ZOOM_SPEED};
+use crate::constants::{
+    CameraUniform, DEFAULT_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE, MIN_CAMERA_DISTANCE, ORBIT_SPEED,
+    PAN_SPEED, ZOOM_SPEED,
+};
 use glam::{Mat4, Vec3};
 use std::f32::consts::TAU;
 

@@ -11,14 +11,12 @@ mod orbit_render;
 mod pipeline;
 mod render_utils;
 mod scene;
-mod uniforms;
-mod utils;
 mod state;
 mod sun;
-use winit::{event_loop::{EventLoop},
-};
+mod uniforms;
+mod utils;
 use app::App;
-
+use winit::event_loop::EventLoop;
 
 fn main() {
     let event_loop = EventLoop::new().unwrap();

@@ -23,17 +23,4 @@ impl Orbit {
             inclination: 0.0,
         }
     }
-
-    pub fn position_at_angle(&self, angle: f32) -> [f32; 3] {
-        let (sin_angle, cos_angle) = angle.sin_cos();
-        let (sin_inclination, cos_inclination) = self.inclination.sin_cos();
-        let x = self.semi_major_axis * cos_angle;
-        let z = self.semi_minor_axis * sin_angle;
-
-        [
-            self.center[0] + x,
-            self.center[1] - z * sin_inclination,
-            self.center[2] + z * cos_inclination,
-        ]
-    }
 }

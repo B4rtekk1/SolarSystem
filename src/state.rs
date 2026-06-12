@@ -1,33 +1,59 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::Instant;
-use egui_wgpu::{Renderer as EguiRenderer, RendererOptions as EguiRendererOptions, ScreenDescriptor};
-use egui_winit::State as EguiWinitState;
-use glam::{DVec3, Vec3};
-use wgpu::Surface;
-use wgpu::util::DeviceExt;
-use winit::keyboard::KeyCode;
-use winit::window::{Fullscreen, Window};
 use crate::camera::Camera;
+use crate::constants::{
+    DEFAULT_ORBIT_THICKNESS_SCALE, DEFAULT_SIMULATION_SPEED, MAX_ORBIT_THICKNESS_SCALE,
+    MAX_SIMULATION_SPEED, MIN_ORBIT_THICKNESS_SCALE, MIN_SIMULATION_SPEED,
+    MOON_ORBIT_FORECAST_MAX_POINTS, MOON_ORBIT_FORECAST_SAMPLE_YEARS, MSAA_SAMPLE_COUNT,
+    ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS, ORBIT_FORECAST_UPDATE_INTERVAL_SECONDS,
+    ORBIT_TRAIL_POINTS, ORBIT_TRAIL_SAMPLE_YEARS, OrbitSegment, SPHERE_LATITUDES,
+    SPHERE_LONGITUDES,
+};
 use crate::ecs::{CelestialKind, Entity, World};
 use crate::fps_overlay::FpsOverlay;
-use crate::nbody::{NBodyConfig, NBodySimulation};
-use crate::constants::{DEFAULT_SIMULATION_SPEED, HIDE_ORBITS_SIMULATION_SPEED, MAX_SIMULATION_SPEED, MIN_SIMULATION_SPEED, MOON_ORBIT_FORECAST_MAX_POINTS,
-                       MOON_ORBIT_FORECAST_SAMPLE_YEARS, MSAA_SAMPLE_COUNT, ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS, ORBIT_FORECAST_UPDATE_INTERVAL_SECONDS,
-                       ORBIT_TRAIL_POINTS, ORBIT_TRAIL_SAMPLE_YEARS, OrbitSegment, SPHERE_LATITUDES, SPHERE_LONGITUDES};
 use crate::geometry::create_sphere;
-use crate::orbit_render::{build_orbit_segments, create_orbit_trails, max_orbit_segment_count, orbit_draw_vertex_count, orbit_width_scale, OrbitForecastWorker};
-use crate::pipeline::{create_screen_dim_pipeline, create_sphere_focus_pipeline, create_sphere_pipeline, create_text_overlay_pipeline};
-use crate::render_utils::{alpha_blending_fragment_state, alpha_blending_fragment_targets, create_depth_target, create_msaa_target, depth_stencil_state, DepthTarget, MsaaTarget, uniform_buffer_layout_entry};
+use crate::nbody::{NBodyConfig, NBodySimulation};
+use crate::orbit_render::{
+    OrbitForecastWorker, build_orbit_segments, create_orbit_trails, max_orbit_segment_count,
+    orbit_draw_vertex_count, orbit_width_scale,
+};
+use crate::pipeline::{
+    create_screen_dim_pipeline, create_sphere_focus_pipeline, create_sphere_pipeline,
+    create_text_overlay_pipeline,
+};
+use crate::render_utils::{
+    DepthTarget, MsaaTarget, alpha_blending_fragment_state, alpha_blending_fragment_targets,
+    create_depth_target, create_msaa_target, depth_stencil_state, uniform_buffer_layout_entry,
+};
 use crate::scene::create_world;
 use crate::uniforms::{dvec3_to_vec3, entity_object_uniform, ray_sphere_distance};
 use crate::utils::show_selected_planet_window;
+use egui_wgpu::{
+    Renderer as EguiRenderer, RendererOptions as EguiRendererOptions, ScreenDescriptor,
+};
+use egui_winit::State as EguiWinitState;
+use glam::{DVec3, Vec3};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Instant;
+use wgpu::Surface;
+use wgpu::util::DeviceExt;
+use winit::dpi::PhysicalSize;
+use winit::keyboard::KeyCode;
+use winit::window::{Fullscreen, Window};
 
 struct ObjectGpu {
     entity: Entity,
     object_buffer: wgpu::Buffer,
     object_bind_group: wgpu::BindGroup,
 }
+
+const MIN_WINDOW_CONTROL_WIDTH: u32 = 320;
+const MIN_WINDOW_CONTROL_HEIGHT: u32 = 240;
+const MAX_WINDOW_CONTROL_WIDTH: u32 = 7680;
+const MAX_WINDOW_CONTROL_HEIGHT: u32 = 4320;
+const CONTROLS_PANEL_DEFAULT_WIDTH: f32 = 300.0;
+const CONTROLS_PANEL_DEFAULT_HEIGHT: f32 = 360.0;
+const CONTROLS_PANEL_MIN_WIDTH: f32 = 240.0;
+const CONTROLS_PANEL_MIN_HEIGHT: f32 = 120.0;
 
 pub struct State {
     pub window: Arc<Window>,
@@ -73,8 +99,14 @@ pub struct State {
     fps_last_update: Instant,
     current_fps: f64,
     simulation_speed: f64,
+    simulation_paused: bool,
     orbits_visible: bool,
+    planet_orbits_visible: bool,
+    moon_orbits_visible: bool,
+    orbit_thickness_scale: f32,
     selected_planet: Option<Entity>,
+    window_width_control: u32,
+    window_height_control: u32,
 }
 
 impl State {
@@ -255,6 +287,9 @@ impl State {
             &physics,
             physics.planet_entities(),
             orbit_width_scale(&camera),
+            true,
+            true,
+            DEFAULT_ORBIT_THICKNESS_SCALE,
             &mut orbit_segments,
         );
         if !orbit_segments.is_empty() {
@@ -428,8 +463,14 @@ impl State {
             fps_last_update: now,
             current_fps: 0.0,
             simulation_speed: DEFAULT_SIMULATION_SPEED,
+            simulation_paused: false,
             orbits_visible: true,
+            planet_orbits_visible: true,
+            moon_orbits_visible: true,
+            orbit_thickness_scale: DEFAULT_ORBIT_THICKNESS_SCALE,
             selected_planet: None,
+            window_width_control: size.width,
+            window_height_control: size.height,
         }
     }
 
@@ -443,6 +484,20 @@ impl State {
         self.surface.configure(&self.device, &self.config);
         self.msaa = create_msaa_target(&self.device, width, height, self.config.format);
         self.depth = create_depth_target(&self.device, width, height);
+        self.window_width_control = width;
+        self.window_height_control = height;
+    }
+
+    fn request_window_size(&mut self, width: u32, height: u32) {
+        let width = width.clamp(MIN_WINDOW_CONTROL_WIDTH, MAX_WINDOW_CONTROL_WIDTH);
+        let height = height.clamp(MIN_WINDOW_CONTROL_HEIGHT, MAX_WINDOW_CONTROL_HEIGHT);
+        self.window_width_control = width;
+        self.window_height_control = height;
+
+        let requested_size = PhysicalSize::new(width, height);
+        if let Some(applied_size) = self.window.request_inner_size(requested_size) {
+            self.resize(applied_size.width, applied_size.height);
+        }
     }
 
     pub fn orbit_camera(&mut self, delta_x: f64, delta_y: f64) {
@@ -478,7 +533,7 @@ impl State {
         let mut closest = None;
 
         for entity in self.world.entities_of_kind(CelestialKind::Planet) {
-            let center = dvec3_to_vec3(self.physics.position(entity));
+            let center = dvec3_to_vec3(self.physics.render_position(entity));
             let radius = (self.world.body(entity).render_radius * 1.45).max(0.08);
             let Some(distance) = ray_sphere_distance(ray_origin, ray_direction, center, radius)
             else {
@@ -547,6 +602,9 @@ impl State {
             &self.physics,
             self.physics.planet_entities(),
             orbit_width_scale(&self.camera),
+            self.orbits_visible && self.planet_orbits_visible,
+            self.orbits_visible && self.moon_orbits_visible,
+            self.orbit_thickness_scale,
             &mut self.orbit_segments,
         );
         self.orbit_vertex_count = orbit_draw_vertex_count(&self.orbit_segments);
@@ -728,15 +786,31 @@ impl State {
         let raw_input = self.egui_winit.take_egui_input(&self.window);
         let egui_ctx = self.egui_ctx.clone();
         let mut simulation_speed = self.simulation_speed;
+        let mut simulation_paused = self.simulation_paused;
         let mut orbits_visible = self.orbits_visible;
+        let mut planet_orbits_visible = self.planet_orbits_visible;
+        let mut moon_orbits_visible = self.moon_orbits_visible;
+        let mut orbit_thickness_scale = self.orbit_thickness_scale;
+        let mut window_width_control = self.window_width_control;
+        let mut window_height_control = self.window_height_control;
+        let mut apply_window_size = false;
         let selected_planet = self.selected_planet;
 
         let full_output = egui_ctx.run_ui(raw_input, |ui| {
             let window_frame = egui::Frame::window(ui.style().as_ref()).shadow(egui::Shadow::NONE);
             egui::Window::new("Controls")
-                .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
+                .default_pos(egui::pos2(8.0, 8.0))
                 .collapsible(false)
-                .resizable(false)
+                .default_size(egui::vec2(
+                    CONTROLS_PANEL_DEFAULT_WIDTH,
+                    CONTROLS_PANEL_DEFAULT_HEIGHT,
+                ))
+                .min_size(egui::vec2(
+                    CONTROLS_PANEL_MIN_WIDTH,
+                    CONTROLS_PANEL_MIN_HEIGHT,
+                ))
+                .resizable(true)
+                .vscroll(true)
                 .frame(window_frame)
                 .show(ui.ctx(), |ui| {
                     ui.add(
@@ -744,23 +818,63 @@ impl State {
                             &mut simulation_speed,
                             MIN_SIMULATION_SPEED..=MAX_SIMULATION_SPEED,
                         )
-                            .text("Simulation Speed"),
+                        .text("Simulation Speed"),
                     );
                     ui.label(format!("{simulation_speed:.2}x"));
-                    let orbit_button_label = if orbits_visible {
-                        "Hide Orbits"
-                    } else {
-                        "Show Orbits"
-                    };
-                    if ui.button(orbit_button_label).clicked() {
-                        orbits_visible = !orbits_visible;
-                    }
+                    ui.checkbox(&mut simulation_paused, "Pause");
+
+                    ui.separator();
+                    ui.heading("Orbits");
+                    ui.checkbox(&mut orbits_visible, "Show orbits");
+                    ui.add_enabled_ui(orbits_visible, |ui| {
+                        ui.checkbox(&mut planet_orbits_visible, "Show planet orbits");
+                        ui.checkbox(&mut moon_orbits_visible, "Show moon orbits");
+                        ui.add(
+                            egui::Slider::new(
+                                &mut orbit_thickness_scale,
+                                MIN_ORBIT_THICKNESS_SCALE..=MAX_ORBIT_THICKNESS_SCALE,
+                            )
+                            .text("Orbit thickness"),
+                        );
+                    });
+
+                    ui.separator();
+                    ui.heading("Window");
+                    ui.horizontal(|ui| {
+                        ui.label("Width");
+                        ui.add(
+                            egui::DragValue::new(&mut window_width_control)
+                                .range(MIN_WINDOW_CONTROL_WIDTH..=MAX_WINDOW_CONTROL_WIDTH)
+                                .speed(16)
+                                .suffix(" px"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Height");
+                        ui.add(
+                            egui::DragValue::new(&mut window_height_control)
+                                .range(MIN_WINDOW_CONTROL_HEIGHT..=MAX_WINDOW_CONTROL_HEIGHT)
+                                .speed(16)
+                                .suffix(" px"),
+                        );
+                    });
+                    apply_window_size = ui.button("Apply size").clicked();
                 });
             show_selected_planet_window(ui.ctx(), &self.world, &self.physics, selected_planet);
         });
 
         self.simulation_speed = simulation_speed.clamp(MIN_SIMULATION_SPEED, MAX_SIMULATION_SPEED);
+        self.simulation_paused = simulation_paused;
         self.orbits_visible = orbits_visible;
+        self.planet_orbits_visible = planet_orbits_visible;
+        self.moon_orbits_visible = moon_orbits_visible;
+        self.orbit_thickness_scale =
+            orbit_thickness_scale.clamp(MIN_ORBIT_THICKNESS_SCALE, MAX_ORBIT_THICKNESS_SCALE);
+        self.window_width_control = window_width_control;
+        self.window_height_control = window_height_control;
+        if apply_window_size {
+            self.request_window_size(window_width_control, window_height_control);
+        }
 
         let egui::FullOutput {
             platform_output,
@@ -785,14 +899,16 @@ impl State {
         let now = Instant::now();
         let frame_seconds = now.duration_since(self.last_physics_update).as_secs_f64();
         self.last_physics_update = now;
-        let scaled_frame_seconds = frame_seconds * self.simulation_speed;
-        if scaled_frame_seconds.is_finite() && scaled_frame_seconds > 0.0 {
-            self.rotation_time += scaled_frame_seconds as f32;
-        }
-        self.physics
-            .advance_scaled(frame_seconds, self.simulation_speed);
-        self.update_orbit_trails();
         let (egui_primitives, egui_textures_delta, egui_screen_descriptor) = self.run_egui();
+        if !self.simulation_paused {
+            let scaled_frame_seconds = frame_seconds * self.simulation_speed;
+            if scaled_frame_seconds.is_finite() && scaled_frame_seconds > 0.0 {
+                self.rotation_time += scaled_frame_seconds as f32;
+            }
+            self.physics
+                .advance_scaled(frame_seconds, self.simulation_speed);
+            self.update_orbit_trails();
+        }
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -816,7 +932,9 @@ impl State {
         );
 
         self.poll_orbit_forecasts();
-        self.request_orbit_forecasts_if_needed(now);
+        if !self.simulation_paused {
+            self.request_orbit_forecasts_if_needed(now);
+        }
         self.upload_orbit_segments();
 
         for object_gpu in &self.object_gpu {
@@ -898,7 +1016,7 @@ impl State {
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
             }
 
-            if self.orbits_visible && self.simulation_speed < HIDE_ORBITS_SIMULATION_SPEED {
+            if self.orbits_visible && self.orbit_vertex_count > 0 {
                 pass.set_pipeline(&self.orbit_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_bind_group(1, &self.orbit_bind_group, &[]);

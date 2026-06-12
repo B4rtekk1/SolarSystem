@@ -54,9 +54,10 @@ fn render_radius_from_km(radius_km: f32) -> f32 {
     const EARTH_RADIUS_KM: f32 = 6_371.0;
     const MIN_RENDER_RADIUS: f32 = 0.018;
     const EARTH_RENDER_RADIUS: f32 = 0.08;
+    const MAX_RENDER_RADIUS: f32 = 0.45;
 
     let earth_radii = (radius_km / EARTH_RADIUS_KM).max(0.0);
-    MIN_RENDER_RADIUS + earth_radii.sqrt() * EARTH_RENDER_RADIUS
+    (MIN_RENDER_RADIUS + earth_radii.sqrt() * EARTH_RENDER_RADIUS).min(MAX_RENDER_RADIUS)
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -1,8 +1,11 @@
 use crate::camera::Camera;
 use crate::color::Color;
-use crate::constants::{DEFAULT_CAMERA_DISTANCE, MAX_ORBIT_WIDTH_SCALE, MIN_ORBIT_WIDTH_SCALE, MOON_ORBIT_FORECAST_MAX_POINTS, MOON_ORBIT_FORECAST_SAMPLE_YEARS,
-                       MOON_ORBIT_HALF_WIDTH_PIXELS, ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS, ORBIT_TRAIL_POINTS, ORBIT_VERTICES_PER_SEGMENT,
-                       OrbitSegment, PLANET_ORBIT_HALF_WIDTH_PIXELS};
+use crate::constants::{
+    DEFAULT_CAMERA_DISTANCE, MAX_ORBIT_WIDTH_SCALE, MIN_ORBIT_WIDTH_SCALE,
+    MOON_ORBIT_FORECAST_MAX_POINTS, MOON_ORBIT_FORECAST_SAMPLE_YEARS, MOON_ORBIT_HALF_WIDTH_PIXELS,
+    ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS, ORBIT_TRAIL_POINTS,
+    ORBIT_VERTICES_PER_SEGMENT, OrbitSegment, PLANET_ORBIT_HALF_WIDTH_PIXELS,
+};
 use crate::ecs::{CelestialKind, Entity, World};
 use crate::nbody::NBodySimulation;
 use crate::uniforms::*;
@@ -109,66 +112,76 @@ pub fn build_orbit_segments(
     physics: &NBodySimulation,
     planet_entities: &[Entity],
     orbit_width_scale: f32,
+    show_planet_orbits: bool,
+    show_moon_orbits: bool,
+    orbit_thickness_scale: f32,
     segments: &mut Vec<OrbitSegment>,
 ) {
-    let planet_half_width_pixels = PLANET_ORBIT_HALF_WIDTH_PIXELS * orbit_width_scale;
-    let moon_half_width_pixels = MOON_ORBIT_HALF_WIDTH_PIXELS * orbit_width_scale;
+    let width_scale = orbit_width_scale * orbit_thickness_scale.max(0.0);
+    let planet_half_width_pixels = PLANET_ORBIT_HALF_WIDTH_PIXELS * width_scale;
+    let moon_half_width_pixels = MOON_ORBIT_HALF_WIDTH_PIXELS * width_scale;
 
-    for (trail, entity) in trails.iter().zip(planet_entities.iter()) {
-        let segment_count = trail.len().saturating_sub(1);
-        if segment_count == 0 {
-            continue;
+    if show_planet_orbits {
+        for (trail, entity) in trails.iter().zip(planet_entities.iter()) {
+            let segment_count = trail.len().saturating_sub(1);
+            if segment_count == 0 {
+                continue;
+            }
+
+            let color = orbit_color(world, *entity);
+            let mut previous = trail[0];
+            for (segment_index, current) in trail.iter().skip(1).enumerate() {
+                let age = (segment_index + 1) as f32 / segment_count as f32;
+                let vertex_color = [color[0], color[1], color[2], 0.08 + age * 0.34];
+                segments.push(orbit_segment(
+                    previous,
+                    *current,
+                    vertex_color,
+                    planet_half_width_pixels,
+                ));
+                previous = *current;
+            }
         }
 
-        let color = orbit_color(world, *entity);
-        let mut previous = trail[0];
-        for (segment_index, current) in trail.iter().skip(1).enumerate() {
-            let age = (segment_index + 1) as f32 / segment_count as f32;
-            let vertex_color = [color[0], color[1], color[2], 0.08 + age * 0.34];
-            segments.push(orbit_segment(
-                previous,
-                *current,
-                vertex_color,
-                planet_half_width_pixels,
-            ));
-            previous = *current;
+        for ((forecast, entity), trail) in forecasts
+            .iter()
+            .zip(planet_entities.iter())
+            .zip(trails.iter())
+        {
+            if forecast.len() < 2 {
+                continue;
+            }
+
+            let color = orbit_color(world, *entity);
+            let future_color = [
+                (color[0] * 1.35).min(1.0),
+                (color[1] * 1.35).min(1.0),
+                (color[2] * 1.35).min(1.0),
+            ];
+            let segment_count = forecast.len() - 1;
+            let mut previous = trail
+                .back()
+                .copied()
+                .unwrap_or_else(|| dvec3_to_vec3(forecast[0]));
+
+            for (segment_index, current) in forecast.iter().skip(1).enumerate() {
+                let age = (segment_index + 1) as f32 / segment_count as f32;
+                let alpha = 0.48 * (1.0 - age).max(0.0) + 0.06;
+                let vertex_color = [future_color[0], future_color[1], future_color[2], alpha];
+                let current = dvec3_to_vec3(*current);
+                segments.push(orbit_segment(
+                    previous,
+                    current,
+                    vertex_color,
+                    planet_half_width_pixels,
+                ));
+                previous = current;
+            }
         }
     }
 
-    for ((forecast, entity), trail) in forecasts
-        .iter()
-        .zip(planet_entities.iter())
-        .zip(trails.iter())
-    {
-        if forecast.len() < 2 {
-            continue;
-        }
-
-        let color = orbit_color(world, *entity);
-        let future_color = [
-            (color[0] * 1.35).min(1.0),
-            (color[1] * 1.35).min(1.0),
-            (color[2] * 1.35).min(1.0),
-        ];
-        let segment_count = forecast.len() - 1;
-        let mut previous = trail
-            .back()
-            .copied()
-            .unwrap_or_else(|| dvec3_to_vec3(forecast[0]));
-
-        for (segment_index, current) in forecast.iter().skip(1).enumerate() {
-            let age = (segment_index + 1) as f32 / segment_count as f32;
-            let alpha = 0.48 * (1.0 - age).max(0.0) + 0.06;
-            let vertex_color = [future_color[0], future_color[1], future_color[2], alpha];
-            let current = dvec3_to_vec3(*current);
-            segments.push(orbit_segment(
-                previous,
-                current,
-                vertex_color,
-                planet_half_width_pixels,
-            ));
-            previous = current;
-        }
+    if !show_moon_orbits {
+        return;
     }
 
     for (moon, offsets) in moon_offsets {
@@ -185,8 +198,8 @@ pub fn build_orbit_segments(
             (color[1] * 1.45).min(1.0),
             (color[2] * 1.45).min(1.0),
         ];
-        let parent_position = dvec3_to_vec3(physics.position(parent));
-        let moon_position = dvec3_to_vec3(physics.position(*moon));
+        let parent_position = dvec3_to_vec3(physics.render_position(parent));
+        let moon_position = dvec3_to_vec3(physics.render_position(*moon));
         let current_offset = moon_position - parent_position;
         let start_index = nearest_orbit_offset_index(offsets, current_offset);
         let remaining_segments = offsets.len().saturating_sub(start_index + 1);
@@ -371,6 +384,9 @@ mod tests {
             &world,
             &physics,
             &[],
+            1.0,
+            true,
+            true,
             1.0,
             &mut segments,
         );

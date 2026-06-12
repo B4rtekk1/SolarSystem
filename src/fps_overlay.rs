@@ -1,6 +1,12 @@
-use crate::constants::{FPS_FONT_SIZE, FPS_LINE_HEIGHT, FPS_TEXT_TEXTURE_HEIGHT, FPS_TEXT_TEXTURE_WIDTH, GOOGLE_SANS_BYTES, TEXT_OVERLAY_MAX_VERTICES};
+use crate::constants::{
+    FPS_FONT_SIZE, FPS_LINE_HEIGHT, FPS_TEXT_TEXTURE_HEIGHT, FPS_TEXT_TEXTURE_WIDTH,
+    GOOGLE_SANS_BYTES, TEXT_OVERLAY_MAX_VERTICES,
+};
 use crate::pipeline::TextOverlayVertex;
-use cosmic_text::{Attrs, Buffer as TextBuffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{
+    Attrs, Buffer as TextBuffer, Color as TextColor, Family, FontSystem, Metrics, Shaping,
+    SwashCache,
+};
 
 use crate::constants::FPS_OVERLAY_MARGIN;
 

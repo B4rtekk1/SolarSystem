@@ -1,5 +1,5 @@
-use std::f32::consts::{PI, TAU};
 use crate::pipeline::Vertex;
+use std::f32::consts::{PI, TAU};
 
 pub fn create_sphere(latitudes: u32, longitudes: u32, radius: f32) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::with_capacity(((latitudes + 1) * (longitudes + 1)) as usize);

@@ -1,6 +1,11 @@
 use crate::color::Color;
-use crate::constants::{EARTH_MASS_KG, EARTH_RADIUS_KM, LUNAR_MASS_KG, LUNAR_RADIUS_KM, SOLAR_MASS_KG, SOLAR_RADIUS_KM};
-use crate::ecs::{AtmosphereComponent, BodyComponent, CelestialKind, Entity, MaterialComponent, ObjectBundle, RenderComponent, RotationComponent, StarMaterial, SurfaceMaterial, World};
+use crate::constants::{
+    EARTH_MASS_KG, EARTH_RADIUS_KM, LUNAR_MASS_KG, LUNAR_RADIUS_KM, SOLAR_MASS_KG, SOLAR_RADIUS_KM,
+};
+use crate::ecs::{
+    AtmosphereComponent, BodyComponent, CelestialKind, Entity, MaterialComponent, ObjectBundle,
+    RenderComponent, RotationComponent, StarMaterial, SurfaceMaterial, World,
+};
 
 pub fn create_world() -> World {
     let mut world = World::default();
@@ -277,5 +282,43 @@ pub fn make_moon(
             }),
         },
         atmosphere: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::CelestialKind;
+
+    #[test]
+    fn planet_orbits_clear_the_rendered_star() {
+        let world = create_world();
+        let star = world
+            .first_entity_of_kind(CelestialKind::Star)
+            .expect("scene should contain a star");
+        let star_radius = world.body(star).render_radius;
+
+        for planet in world.entities_of_kind(CelestialKind::Planet) {
+            let body = world.body(planet);
+            let orbit = body.orbit.expect("planet should have an orbit");
+            let periapsis = orbit_periapsis(orbit.semi_major_axis, orbit.semi_minor_axis);
+
+            assert!(
+                periapsis > star_radius,
+                "{} orbit periapsis {periapsis} should clear rendered star radius {star_radius}",
+                world.name(planet)
+            );
+        }
+    }
+
+    fn orbit_periapsis(semi_major_axis: f32, semi_minor_axis: f32) -> f32 {
+        let semi_major_axis = semi_major_axis.abs().max(f32::EPSILON);
+        let semi_minor_axis = semi_minor_axis.abs().min(semi_major_axis);
+        let eccentricity = (1.0
+            - semi_minor_axis * semi_minor_axis / (semi_major_axis * semi_major_axis))
+            .clamp(0.0, 1.0)
+            .sqrt();
+
+        semi_major_axis * (1.0 - eccentricity)
     }
 }

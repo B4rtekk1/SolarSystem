@@ -1,8 +1,8 @@
-use std::f32::consts::TAU;
-use glam::{DVec3, Mat4, Vec3};
+use crate::constants::SELECTION_FOCUS_BRIGHTNESS;
 use crate::ecs::{CelestialKind, Entity, MaterialComponent, World};
 use crate::nbody::NBodySimulation;
-use crate::constants::SELECTION_FOCUS_BRIGHTNESS;
+use glam::{DVec3, Mat4, Vec3};
+use std::f32::consts::TAU;
 
 pub type ObjectUniform = [f32; 32];
 
@@ -41,9 +41,9 @@ fn selection_emphasis(world: &World, entity: Entity, selected_planet: Option<Ent
 fn is_selection_focus(world: &World, entity: Entity, selected_planet: Entity) -> bool {
     entity == selected_planet
         || (world.kind(entity) == CelestialKind::Moon
-        && world
-        .parent(entity)
-        .is_some_and(|parent| parent.entity == selected_planet))
+            && world
+                .parent(entity)
+                .is_some_and(|parent| parent.entity == selected_planet))
 }
 
 pub fn entity_object_uniform(
@@ -56,7 +56,7 @@ pub fn entity_object_uniform(
     let body = world.body(entity);
     let rotation = world.rotation(entity);
     let render = world.render(entity);
-    let position = dvec3_to_vec3(physics.position(entity));
+    let position = dvec3_to_vec3(physics.render_position(entity));
     let rotation_angle = (shader_time * rotation.speed).rem_euclid(TAU);
     let model = Mat4::from_translation(position)
         * Mat4::from_rotation_y(rotation_angle)
@@ -117,7 +117,12 @@ pub fn selection_brightness(world: &World, entity: Entity, selected_planet: Opti
     }
 }
 
-pub fn ray_sphere_distance(origin: Vec3, direction: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+pub fn ray_sphere_distance(
+    origin: Vec3,
+    direction: Vec3,
+    center: Vec3,
+    radius: f32,
+) -> Option<f32> {
     let offset = origin - center;
     let b = offset.dot(direction);
     let c = offset.length_squared() - radius * radius;
