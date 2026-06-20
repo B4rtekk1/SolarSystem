@@ -1,6 +1,7 @@
 use crate::constants::{TEXT_OVERLAY_VERTEX_ATTRIBUTES, VERTEX_ATTRIBUTES};
 use crate::render_utils::{
     alpha_blending_fragment_state, alpha_blending_fragment_targets, depth_stencil_state,
+    replace_fragment_targets,
 };
 
 pub type TextOverlayVertex = [f32; 4];
@@ -26,7 +27,7 @@ pub fn create_sphere_pipeline(
     )
 }
 
-pub fn create_sphere_focus_pipeline(
+pub fn create_sphere_overlay_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     layout: &wgpu::PipelineLayout,
@@ -42,22 +43,42 @@ pub fn create_sphere_focus_pipeline(
         sample_count,
         label,
         false,
-        wgpu::CompareFunction::LessEqual,
+        wgpu::CompareFunction::Always,
     )
 }
 
-fn create_sphere_pipeline_with_depth(
+pub fn create_sphere_replace_overlay_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     sample_count: u32,
     label: &str,
+) -> wgpu::RenderPipeline {
+    create_sphere_pipeline_with_options(
+        device,
+        format,
+        layout,
+        shader,
+        sample_count,
+        label,
+        false,
+        wgpu::CompareFunction::Always,
+        &replace_fragment_targets(format),
+    )
+}
+
+fn create_sphere_pipeline_with_options(
+    device: &wgpu::Device,
+    _format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    sample_count: u32,
+    label: &str,
     depth_write_enabled: bool,
     depth_compare: wgpu::CompareFunction,
+    fragment_targets: &[Option<wgpu::ColorTargetState>],
 ) -> wgpu::RenderPipeline {
-    let fragment_targets = alpha_blending_fragment_targets(format);
-
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -71,7 +92,7 @@ fn create_sphere_pipeline_with_depth(
             }],
             compilation_options: Default::default(),
         },
-        fragment: Some(alpha_blending_fragment_state(shader, &fragment_targets)),
+        fragment: Some(alpha_blending_fragment_state(shader, fragment_targets)),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: Some(depth_stencil_state(depth_write_enabled, depth_compare)),
         multisample: wgpu::MultisampleState {
@@ -81,6 +102,29 @@ fn create_sphere_pipeline_with_depth(
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn create_sphere_pipeline_with_depth(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    sample_count: u32,
+    label: &str,
+    depth_write_enabled: bool,
+    depth_compare: wgpu::CompareFunction,
+) -> wgpu::RenderPipeline {
+    create_sphere_pipeline_with_options(
+        device,
+        format,
+        layout,
+        shader,
+        sample_count,
+        label,
+        depth_write_enabled,
+        depth_compare,
+        &alpha_blending_fragment_targets(format),
+    )
 }
 
 pub fn create_text_overlay_pipeline(

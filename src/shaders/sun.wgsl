@@ -59,6 +59,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let front_light = 0.74 + max(dot(n, normalize(vec3<f32>(-0.35, 0.55, 0.75))), 0.0) * 0.26;
     let rim = pow(1.0 - max(dot(n, normalize(-in.world_pos)), 0.0), 2.0);
     let flare = object.accent_color.rgb * rim * (0.35 + temperature_mix * 0.65);
+    let brightness = max(object.emissive.x, 0.0);
+    let selection_brightness = max(object.emissive.z, 0.0);
 
-    return vec4<f32>((surface_color * front_light + flare) * object.emissive.x, 1.0);
+    return vec4<f32>((surface_color * front_light + flare) * brightness * selection_brightness, 1.0);
 }

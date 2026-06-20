@@ -5,16 +5,20 @@ mod constants;
 mod ecs;
 mod fps_overlay;
 mod geometry;
+mod moon;
 mod nbody;
 mod orbit;
 mod orbit_render;
 mod pipeline;
 mod render_utils;
+mod ring_particles;
+mod save;
 mod scene;
+mod stars;
 mod state;
-mod sun;
 mod uniforms;
 mod utils;
+
 use app::App;
 use winit::event_loop::EventLoop;
 

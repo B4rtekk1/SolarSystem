@@ -18,6 +18,14 @@ pub fn alpha_blending_fragment_targets(
     })]
 }
 
+pub fn replace_fragment_targets(format: wgpu::TextureFormat) -> [Option<wgpu::ColorTargetState>; 1] {
+    [Some(wgpu::ColorTargetState {
+        format,
+        blend: Some(wgpu::BlendState::REPLACE),
+        write_mask: wgpu::ColorWrites::ALL,
+    })]
+}
+
 pub fn alpha_blending_fragment_state<'a>(
     shader: &'a wgpu::ShaderModule,
     targets: &'a [Option<wgpu::ColorTargetState>],

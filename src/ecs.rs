@@ -83,6 +83,36 @@ impl AtmosphereComponent {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct RingComponent {
+    pub inner_radius_multiplier: f32,
+    pub outer_radius_multiplier: f32,
+    pub tilt: f32,
+    pub rotation_speed: f32,
+    pub color: Color,
+    pub particle_count: u32,
+}
+
+impl RingComponent {
+    pub const fn new(
+        inner_radius_multiplier: f32,
+        outer_radius_multiplier: f32,
+        tilt: f32,
+        rotation_speed: f32,
+        color: Color,
+        particle_count: u32,
+    ) -> Self {
+        Self {
+            inner_radius_multiplier,
+            outer_radius_multiplier,
+            tilt,
+            rotation_speed,
+            color,
+            particle_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct StarMaterial {
     pub base_color: Color,
     pub accent_color: Color,
@@ -118,6 +148,7 @@ pub struct ObjectBundle {
     pub rotation: RotationComponent,
     pub render: RenderComponent,
     pub atmosphere: Option<AtmosphereComponent>,
+    pub ring: Option<RingComponent>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -129,6 +160,7 @@ pub struct World {
     rotations: Vec<RotationComponent>,
     renders: Vec<RenderComponent>,
     atmospheres: Vec<Option<AtmosphereComponent>>,
+    rings: Vec<Option<RingComponent>>,
 }
 
 impl World {
@@ -143,6 +175,7 @@ impl World {
         self.rotations.push(bundle.rotation);
         self.renders.push(bundle.render);
         self.atmospheres.push(bundle.atmosphere);
+        self.rings.push(bundle.ring);
 
         entity
     }
@@ -210,6 +243,10 @@ impl World {
         self.atmospheres[entity.index()].as_mut()
     }
 
+    pub fn ring(&self, entity: Entity) -> Option<RingComponent> {
+        self.rings[entity.index()]
+    }
+
     pub fn surface_material(&self, entity: Entity) -> Option<SurfaceMaterial> {
         match self.renders[entity.index()].material {
             MaterialComponent::Surface(material) => Some(material),
@@ -224,17 +261,14 @@ impl World {
         }
     }
 
-    pub fn star_material(&self, entity: Entity) -> Option<StarMaterial> {
-        match self.renders[entity.index()].material {
-            MaterialComponent::Star(material) => Some(material),
-            MaterialComponent::Surface(_) => None,
-        }
-    }
-
     pub fn star_material_mut(&mut self, entity: Entity) -> Option<&mut StarMaterial> {
         match &mut self.renders[entity.index()].material {
             MaterialComponent::Star(material) => Some(material),
             MaterialComponent::Surface(_) => None,
         }
+    }
+
+    pub fn set_name(&mut self, entity: Entity, name: String) {
+        self.names[entity.index()].value = name;
     }
 }

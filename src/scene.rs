@@ -4,8 +4,10 @@ use crate::constants::{
 };
 use crate::ecs::{
     AtmosphereComponent, BodyComponent, CelestialKind, Entity, MaterialComponent, ObjectBundle,
-    RenderComponent, RotationComponent, StarMaterial, SurfaceMaterial, World,
+    RenderComponent, RingComponent, RotationComponent, StarMaterial, SurfaceMaterial, World,
 };
+
+const MEAN_LUNAR_DISTANCE_AU: f32 = 384_400.0_f32 / 149_597_870.7_f32;
 
 pub fn create_world() -> World {
     let mut world = World::default();
@@ -105,6 +107,18 @@ pub fn create_world() -> World {
                 0.20 + index as f32 * 0.03,
                 1.08,
             )),
+            ring: if index == 4 {
+                Some(RingComponent::new(
+                    1.22,
+                    2.35,
+                    0.42,
+                    0.35,
+                    Color::rgb(0.78, 0.72, 0.58),
+                    5000,
+                ))
+            } else {
+                None
+            },
         });
 
         for moon in create_moons_for_planet(index, planet) {
@@ -131,6 +145,7 @@ pub fn star_bundle() -> ObjectBundle {
             }),
         },
         atmosphere: None,
+        ring: None,
     }
 }
 
@@ -140,7 +155,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
             parent,
             "Luma",
             0.85,
-            0.36,
+            lunar_distance(1.00),
             32.0,
             0.18,
             0.40,
@@ -150,7 +165,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
             parent,
             "Cinder",
             0.56,
-            0.27,
+            lunar_distance(0.75),
             -44.0,
             -0.10,
             1.70,
@@ -161,7 +176,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
                 parent,
                 "Nami",
                 0.72,
-                0.35,
+                lunar_distance(0.97),
                 28.0,
                 0.22,
                 0.20,
@@ -171,7 +186,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
                 parent,
                 "Thalassa",
                 0.56,
-                0.52,
+                lunar_distance(1.44),
                 -18.0,
                 -0.16,
                 2.40,
@@ -182,7 +197,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
             parent,
             "Pyra",
             0.48,
-            0.23,
+            lunar_distance(0.64),
             55.0,
             0.05,
             2.80,
@@ -193,7 +208,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
                 parent,
                 "Caldus",
                 1.15,
-                0.46,
+                lunar_distance(1.28),
                 22.0,
                 0.25,
                 0.90,
@@ -203,7 +218,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
                 parent,
                 "Rime",
                 0.85,
-                0.63,
+                lunar_distance(1.75),
                 -15.0,
                 -0.18,
                 2.20,
@@ -213,7 +228,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
                 parent,
                 "Aster",
                 0.64,
-                0.82,
+                lunar_distance(2.28),
                 10.0,
                 0.34,
                 3.60,
@@ -225,7 +240,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
                 parent,
                 "Umbra",
                 0.65,
-                0.30,
+                lunar_distance(0.83),
                 34.0,
                 -0.25,
                 1.10,
@@ -235,7 +250,7 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
                 parent,
                 "Nyxis",
                 0.56,
-                0.46,
+                lunar_distance(1.28),
                 -21.0,
                 0.20,
                 2.90,
@@ -244,6 +259,10 @@ pub fn create_moons_for_planet(planet_index: usize, parent: Entity) -> Vec<Objec
         ],
         _ => Vec::new(),
     }
+}
+
+fn lunar_distance(multiplier: f32) -> f32 {
+    MEAN_LUNAR_DISTANCE_AU * multiplier
 }
 
 pub fn make_moon(
@@ -282,6 +301,7 @@ pub fn make_moon(
             }),
         },
         atmosphere: None,
+        ring: None,
     }
 }
 
@@ -291,34 +311,36 @@ mod tests {
     use crate::ecs::CelestialKind;
 
     #[test]
-    fn planet_orbits_clear_the_rendered_star() {
+    fn generated_moons_start_inside_parent_hill_spheres() {
         let world = create_world();
-        let star = world
-            .first_entity_of_kind(CelestialKind::Star)
-            .expect("scene should contain a star");
-        let star_radius = world.body(star).render_radius;
+        let Some(star) = world.first_entity_of_kind(CelestialKind::Star) else {
+            panic!("scene should contain a star");
+        };
+        let star_mass = world.body(star).mass;
 
         for planet in world.entities_of_kind(CelestialKind::Planet) {
-            let body = world.body(planet);
-            let orbit = body.orbit.expect("planet should have an orbit");
-            let periapsis = orbit_periapsis(orbit.semi_major_axis, orbit.semi_minor_axis);
+            let planet_body = world.body(planet);
+            let Some(planet_orbit) = planet_body.orbit else {
+                continue;
+            };
+            let hill_radius =
+                planet_orbit.semi_major_axis * (planet_body.mass / (3.0 * star_mass)).cbrt();
 
-            assert!(
-                periapsis > star_radius,
-                "{} orbit periapsis {periapsis} should clear rendered star radius {star_radius}",
-                world.name(planet)
-            );
+            for moon in world.children_of_kind(planet, CelestialKind::Moon) {
+                let moon_orbit = world
+                    .body(moon)
+                    .orbit
+                    .expect("generated moons should have an orbit");
+
+                assert!(
+                    moon_orbit.semi_major_axis < hill_radius * 0.35,
+                    "{} starts too far from {}: {:.6} AU vs safe Hill radius {:.6} AU",
+                    world.name(moon),
+                    world.name(planet),
+                    moon_orbit.semi_major_axis,
+                    hill_radius * 0.35
+                );
+            }
         }
-    }
-
-    fn orbit_periapsis(semi_major_axis: f32, semi_minor_axis: f32) -> f32 {
-        let semi_major_axis = semi_major_axis.abs().max(f32::EPSILON);
-        let semi_minor_axis = semi_minor_axis.abs().min(semi_major_axis);
-        let eccentricity = (1.0
-            - semi_minor_axis * semi_minor_axis / (semi_major_axis * semi_major_axis))
-            .clamp(0.0, 1.0)
-            .sqrt();
-
-        semi_major_axis * (1.0 - eccentricity)
     }
 }

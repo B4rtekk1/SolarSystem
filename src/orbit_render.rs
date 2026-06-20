@@ -198,22 +198,33 @@ pub fn build_orbit_segments(
             (color[1] * 1.45).min(1.0),
             (color[2] * 1.45).min(1.0),
         ];
-        let parent_position = dvec3_to_vec3(physics.render_position(parent));
-        let moon_position = dvec3_to_vec3(physics.render_position(*moon));
-        let current_offset = moon_position - parent_position;
-        let start_index = nearest_orbit_offset_index(offsets, current_offset);
-        let remaining_segments = offsets.len().saturating_sub(start_index + 1);
-        if remaining_segments == 0 {
-            continue;
-        }
+        let parent_position = rendered_entity_position(world, physics, parent);
 
+        // FIX #1: Use raw_current_offset (before rendered_moon_offset transform) for
+        // nearest_orbit_offset_index, so it compares in the same space as the raw offsets
+        // stored in the forecast buffer.
+        let raw_current_offset =
+            dvec3_to_vec3(physics.render_position(*moon) - physics.render_position(parent));
+        let current_offset = rendered_moon_offset(world, *moon, raw_current_offset);
+        let moon_position = parent_position + current_offset;
+
+        let start_index = nearest_orbit_offset_index(offsets, raw_current_offset);
+
+        let segment_count = offsets.len() - 1;
         let mut previous = moon_position;
 
-        for (segment_index, offset) in offsets.iter().skip(start_index + 1).enumerate() {
-            let age = (segment_index + 1) as f32 / remaining_segments as f32;
+        for segment_index in 0..segment_count {
+            let offset_index = (start_index + segment_index + 1) % offsets.len();
+            let offset = offsets[offset_index];
+            let age = (segment_index + 1) as f32 / segment_count as f32;
             let alpha = 0.36 * (1.0 - age).max(0.0) + 0.05;
             let vertex_color = [future_color[0], future_color[1], future_color[2], alpha];
-            let current = parent_position + dvec3_to_vec3(*offset);
+            let current =
+                parent_position + rendered_moon_offset(world, *moon, dvec3_to_vec3(offset));
+            if !is_reasonable_moon_orbit_segment(previous, current, parent_position) {
+                previous = current;
+                continue;
+            }
             segments.push(orbit_segment(
                 previous,
                 current,
@@ -223,6 +234,21 @@ pub fn build_orbit_segments(
             previous = current;
         }
     }
+}
+
+fn is_reasonable_moon_orbit_segment(previous: Vec3, current: Vec3, parent_position: Vec3) -> bool {
+    if !previous.is_finite() || !current.is_finite() || !parent_position.is_finite() {
+        return false;
+    }
+
+    let previous_radius = (previous - parent_position).length();
+    let current_radius = (current - parent_position).length();
+    let orbit_radius = previous_radius.max(current_radius);
+    if orbit_radius <= f32::EPSILON {
+        return false;
+    }
+
+    (current - previous).length() <= orbit_radius * 0.35
 }
 
 pub fn orbit_segment(
@@ -287,6 +313,12 @@ pub fn create_orbit_trails(physics: &NBodySimulation) -> Vec<VecDeque<Vec3>> {
         .collect()
 }
 
+/// Finds the index in `offsets` whose direction best matches `current_offset`,
+/// combining angular similarity with radial proximity to avoid false matches
+/// on elliptical orbits where two points can share a similar angle.
+///
+/// NOTE: `current_offset` and `offsets` must be in the same coordinate space
+/// (both raw, before `rendered_moon_offset`).
 pub fn nearest_orbit_offset_index(offsets: &[DVec3], current_offset: Vec3) -> usize {
     if offsets.is_empty() {
         return 0;
@@ -308,7 +340,13 @@ pub fn nearest_orbit_offset_index(offsets: &[DVec3], current_offset: Vec3) -> us
             continue;
         }
 
-        let score = current_direction.dot(offset / offset_length);
+        // FIX #2: Weight angular similarity by radial proximity so that on
+        // elliptical orbits two points with a similar direction but very
+        // different radii no longer score equally.
+        let angular_score = current_direction.dot(offset / offset_length);
+        let radial_ratio = (current_length / offset_length).min(offset_length / current_length);
+        let score = angular_score * radial_ratio;
+
         if score > best_score {
             best_index = index;
             best_score = score;
@@ -349,6 +387,7 @@ mod tests {
                 }),
             },
             atmosphere: None,
+            ring: None,
         });
         let planet = world.spawn(test_surface_body(
             "Planet",
@@ -398,6 +437,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn moon_forecast_skips_stale_long_segments() {
+        let mut world = World::default();
+        let star = world.spawn(test_star());
+        let planet = world.spawn(test_surface_body(
+            "Planet",
+            CelestialKind::Planet,
+            Some(star),
+            5.972e24,
+            0.1,
+            Orbit::circular(1.0, 1.0),
+        ));
+        let moon = world.spawn(test_surface_body(
+            "Moon",
+            CelestialKind::Moon,
+            Some(planet),
+            7.342e22,
+            0.03,
+            Orbit::circular(0.3, 1.0),
+        ));
+        let physics = NBodySimulation::from_world(&world, NBodyConfig::default());
+        let offsets = vec![
+            DVec3::new(0.3, 0.0, 0.0),
+            DVec3::new(-0.3, 0.0, 0.0),
+            DVec3::new(-0.29, 0.01, 0.0),
+        ];
+        let moon_offsets = vec![(moon, offsets)];
+        let mut segments = Vec::new();
+
+        build_orbit_segments(
+            &[],
+            &[],
+            &moon_offsets,
+            &world,
+            &physics,
+            &[],
+            1.0,
+            true,
+            true,
+            1.0,
+            &mut segments,
+        );
+
+        assert_eq!(segments.len(), 1);
+    }
+
+    #[test]
+    fn moon_forecast_wraps_after_last_matching_point() {
+        let mut world = World::default();
+        let star = world.spawn(test_star());
+        let planet = world.spawn(test_surface_body(
+            "Planet",
+            CelestialKind::Planet,
+            Some(star),
+            5.972e24,
+            0.1,
+            Orbit::circular(1.0, 1.0),
+        ));
+        let moon = world.spawn(test_surface_body(
+            "Moon",
+            CelestialKind::Moon,
+            Some(planet),
+            7.342e22,
+            0.03,
+            Orbit::circular(0.3, 1.0),
+        ));
+        let physics = NBodySimulation::from_world(&world, NBodyConfig::default());
+        let current_offset = physics.position(moon) - physics.position(planet);
+        let offsets = vec![
+            current_offset + DVec3::new(0.0, 0.01, 0.0),
+            current_offset + DVec3::new(0.0, 0.02, 0.0),
+            current_offset,
+        ];
+        let moon_offsets = vec![(moon, offsets)];
+        let mut segments = Vec::new();
+
+        build_orbit_segments(
+            &[],
+            &[],
+            &moon_offsets,
+            &world,
+            &physics,
+            &[],
+            1.0,
+            true,
+            true,
+            1.0,
+            &mut segments,
+        );
+
+        assert_eq!(segments.len(), 2);
+    }
+
+    fn test_star() -> ObjectBundle {
+        ObjectBundle {
+            name: "Star".to_string(),
+            kind: CelestialKind::Star,
+            parent: None,
+            body: BodyComponent::new(1.989e30, 1.0, None),
+            rotation: RotationComponent { speed: 0.0 },
+            render: RenderComponent {
+                material: MaterialComponent::Star(StarMaterial {
+                    base_color: Color::rgb(1.0, 0.8, 0.2),
+                    accent_color: Color::rgb(1.0, 1.0, 0.5),
+                    brightness: 1.0,
+                    surface_temperature: 5778.0,
+                }),
+            },
+            atmosphere: None,
+            ring: None,
+        }
+    }
+
     fn test_surface_body(
         name: &str,
         kind: CelestialKind,
@@ -421,6 +573,7 @@ mod tests {
                 }),
             },
             atmosphere: None,
+            ring: None,
         }
     }
 

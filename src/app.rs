@@ -10,12 +10,22 @@ use winit::window::WindowAttributes;
 #[derive(Default)]
 pub struct App {
     state: Option<State>,
+    closing: bool,
     rotating_world: bool,
     panning_map: bool,
     cursor_position: Option<(f64, f64)>,
     left_press_cursor: Option<(f64, f64)>,
     left_drag_moved: bool,
     last_cursor: Option<(f64, f64)>,
+}
+
+impl App {
+    fn shutdown(&mut self) {
+        self.closing = true;
+        if let Some(state) = self.state.take() {
+            state.wait_idle();
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -28,7 +38,6 @@ impl ApplicationHandler for App {
 
         self.state = Some(pollster::block_on(State::new(window)));
         if let Some(state) = &self.state {
-            state.update_window_title();
             state.window.request_redraw();
         }
     }
@@ -49,7 +58,10 @@ impl ApplicationHandler for App {
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.shutdown();
+                event_loop.exit();
+            }
 
             WindowEvent::Resized(size) => {
                 state.resize(size.width, size.height);
@@ -118,7 +130,7 @@ impl ApplicationHandler for App {
 
                             if should_select {
                                 if let Some(cursor) = click_cursor {
-                                    if state.select_planet_at(cursor) {
+                                    if state.select_body_at(cursor) {
                                         state.window.request_redraw();
                                     }
                                 }
@@ -162,12 +174,18 @@ impl ApplicationHandler for App {
                 self.last_cursor = Some(current);
             }
 
-            WindowEvent::RedrawRequested => {
+            WindowEvent::RedrawRequested if !self.closing => {
                 state.render();
-                state.window.request_redraw();
+                if !self.closing {
+                    state.window.request_redraw();
+                }
             }
 
             _ => {}
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.shutdown();
     }
 }

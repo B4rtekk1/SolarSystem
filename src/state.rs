@@ -16,16 +16,21 @@ use crate::orbit_render::{
     orbit_draw_vertex_count, orbit_width_scale,
 };
 use crate::pipeline::{
-    create_screen_dim_pipeline, create_sphere_focus_pipeline, create_sphere_pipeline,
+    create_screen_dim_pipeline, create_sphere_overlay_pipeline, create_sphere_pipeline,
+    create_sphere_replace_overlay_pipeline,
     create_text_overlay_pipeline,
 };
 use crate::render_utils::{
     DepthTarget, MsaaTarget, alpha_blending_fragment_state, alpha_blending_fragment_targets,
     create_depth_target, create_msaa_target, depth_stencil_state, uniform_buffer_layout_entry,
 };
+use crate::ring_particles::PlanetRingSystem;
 use crate::scene::create_world;
-use crate::uniforms::{dvec3_to_vec3, entity_object_uniform, ray_sphere_distance};
-use crate::utils::show_selected_planet_window;
+use crate::stars::Starfield;
+use crate::uniforms::{
+    dvec3_to_vec3, entity_object_uniform, ray_sphere_distance, rendered_entity_position,
+};
+use crate::utils::show_selected_body_window;
 use egui_wgpu::{
     Renderer as EguiRenderer, RendererOptions as EguiRendererOptions, ScreenDescriptor,
 };
@@ -62,8 +67,12 @@ pub struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     sun_pipeline: wgpu::RenderPipeline,
+    sun_focus_pipeline: wgpu::RenderPipeline,
+    starfield: Starfield,
     planet_pipeline: wgpu::RenderPipeline,
+    moon_pipeline: wgpu::RenderPipeline,
     planet_focus_pipeline: wgpu::RenderPipeline,
+    planet_rings: PlanetRingSystem,
     orbit_pipeline: wgpu::RenderPipeline,
     screen_dim_pipeline: wgpu::RenderPipeline,
     text_overlay_pipeline: wgpu::RenderPipeline,
@@ -104,7 +113,7 @@ pub struct State {
     planet_orbits_visible: bool,
     moon_orbits_visible: bool,
     orbit_thickness_scale: f32,
-    selected_planet: Option<Entity>,
+    selected_body: Option<Entity>,
     window_width_control: u32,
     window_height_control: u32,
 }
@@ -321,21 +330,50 @@ impl State {
             MSAA_SAMPLE_COUNT,
             "Sun Pipeline",
         );
-        let planet_pipeline = create_sphere_pipeline(
+        let sun_focus_pipeline = create_sphere_replace_overlay_pipeline(
             &device,
             format,
             &pipeline_layout,
-            &planet_shader,
+            &sun_shader,
             MSAA_SAMPLE_COUNT,
-            "Planet Pipeline",
+            "Sun Focus Overlay Pipeline",
         );
-        let planet_focus_pipeline = create_sphere_focus_pipeline(
+        let starfield = Starfield::new(
+            &device,
+            format,
+            MSAA_SAMPLE_COUNT,
+            &camera_bind_group_layout,
+        );
+        let planet_rings = PlanetRingSystem::new(
+            &device,
+            format,
+            MSAA_SAMPLE_COUNT,
+            &camera_bind_group_layout,
+            &world,
+        );
+        let planet_pipeline = create_sphere_overlay_pipeline(
             &device,
             format,
             &pipeline_layout,
             &planet_shader,
             MSAA_SAMPLE_COUNT,
-            "Planet Focus Pipeline",
+            "Planet Overlay Pipeline",
+        );
+        let moon_pipeline = create_sphere_overlay_pipeline(
+            &device,
+            format,
+            &pipeline_layout,
+            &planet_shader,
+            MSAA_SAMPLE_COUNT,
+            "Moon Overlay Pipeline",
+        );
+        let planet_focus_pipeline = create_sphere_overlay_pipeline(
+            &device,
+            format,
+            &pipeline_layout,
+            &planet_shader,
+            MSAA_SAMPLE_COUNT,
+            "Planet Focus Overlay Pipeline",
         );
         let screen_dim_pipeline =
             create_screen_dim_pipeline(&device, format, &screen_dim_shader, MSAA_SAMPLE_COUNT);
@@ -426,8 +464,12 @@ impl State {
             queue,
             config,
             sun_pipeline,
+            sun_focus_pipeline,
+            starfield,
             planet_pipeline,
+            moon_pipeline,
             planet_focus_pipeline,
+            planet_rings,
             orbit_pipeline,
             screen_dim_pipeline,
             text_overlay_pipeline,
@@ -468,7 +510,7 @@ impl State {
             planet_orbits_visible: true,
             moon_orbits_visible: true,
             orbit_thickness_scale: DEFAULT_ORBIT_THICKNESS_SCALE,
-            selected_planet: None,
+            selected_body: None,
             window_width_control: size.width,
             window_height_control: size.height,
         }
@@ -513,17 +555,17 @@ impl State {
         self.orbit_segments_dirty = true;
     }
 
-    pub fn select_planet_at(&mut self, cursor: (f64, f64)) -> bool {
-        let selected_planet = self.pick_planet(cursor);
-        if self.selected_planet == selected_planet {
+    pub fn select_body_at(&mut self, cursor: (f64, f64)) -> bool {
+        let selected_body = self.pick_body(cursor);
+        if self.selected_body == selected_body {
             return false;
         }
 
-        self.selected_planet = selected_planet;
+        self.selected_body = selected_body;
         true
     }
 
-    fn pick_planet(&self, cursor: (f64, f64)) -> Option<Entity> {
+    fn pick_body(&self, cursor: (f64, f64)) -> Option<Entity> {
         let (ray_origin, ray_direction) = self.camera.screen_ray(
             cursor.0 as f32,
             cursor.1 as f32,
@@ -532,9 +574,20 @@ impl State {
         );
         let mut closest = None;
 
-        for entity in self.world.entities_of_kind(CelestialKind::Planet) {
-            let center = dvec3_to_vec3(self.physics.render_position(entity));
-            let radius = (self.world.body(entity).render_radius * 1.45).max(0.08);
+        for entity in self.world.entities().filter(|entity| {
+            matches!(
+                self.world.kind(*entity),
+                CelestialKind::Star | CelestialKind::Planet | CelestialKind::Moon
+            )
+        }) {
+            let center = rendered_entity_position(&self.world, &self.physics, entity);
+            let body = self.world.body(entity);
+            let radius = match self.world.kind(entity) {
+                CelestialKind::Star => (body.render_radius * 2.0).max(0.5),
+                CelestialKind::Planet | CelestialKind::Moon => {
+                    (body.render_radius * 1.45).max(0.08)
+                }
+            };
             let Some(distance) = ray_sphere_distance(ray_origin, ray_direction, center, radius)
             else {
                 continue;
@@ -730,36 +783,7 @@ impl State {
             material.brightness = material.brightness.clamp(0.1, 4.0);
             material.surface_temperature = material.surface_temperature.clamp(2500.0, 12000.0);
         }
-        self.update_window_title();
         true
-    }
-
-    pub fn update_window_title(&self) {
-        let Some(planet) = self.world.first_entity_of_kind(CelestialKind::Planet) else {
-            return;
-        };
-        let Some(surface) = self.world.surface_material(planet) else {
-            return;
-        };
-        let atmosphere_density = self
-            .world
-            .atmosphere(planet)
-            .map_or(0.0, |atmosphere| atmosphere.density);
-        let star = self.world.first_entity_of_kind(CelestialKind::Star);
-        let star_material = star.and_then(|entity| self.world.star_material(entity));
-        let planet_count = self.world.count_kind(CelestialKind::Planet);
-        let moon_count = self.world.count_kind(CelestialKind::Moon);
-        self.window.set_title(&format!(
-            "Solar WGPU | N-body {:.2} y | planets {} moons {} | Planet Q/A rough {:.2} W/S metal {:.2} E/D atm {:.2} | Sun R/F bright {:.2} T/G temp {:.0}K",
-            self.physics.elapsed_years(),
-            planet_count,
-            moon_count,
-            surface.roughness,
-            surface.metallic,
-            atmosphere_density,
-            star_material.map_or(0.0, |material| material.brightness),
-            star_material.map_or(0.0, |material| material.surface_temperature)
-        ));
     }
 
     fn update_fps_counter(&mut self, now: Instant) {
@@ -773,7 +797,6 @@ impl State {
         self.current_fps = self.fps_frame_count as f64 / elapsed.as_secs_f64();
         self.fps_frame_count = 0;
         self.fps_last_update = now;
-        self.update_window_title();
     }
 
     fn run_egui(
@@ -794,13 +817,13 @@ impl State {
         let mut window_width_control = self.window_width_control;
         let mut window_height_control = self.window_height_control;
         let mut apply_window_size = false;
-        let selected_planet = self.selected_planet;
+        let selected_body = self.selected_body;
 
         let full_output = egui_ctx.run_ui(raw_input, |ui| {
             let window_frame = egui::Frame::window(ui.style().as_ref()).shadow(egui::Shadow::NONE);
             egui::Window::new("Controls")
                 .default_pos(egui::pos2(8.0, 8.0))
-                .collapsible(false)
+                .collapsible(true)
                 .default_size(egui::vec2(
                     CONTROLS_PANEL_DEFAULT_WIDTH,
                     CONTROLS_PANEL_DEFAULT_HEIGHT,
@@ -813,6 +836,10 @@ impl State {
                 .vscroll(true)
                 .frame(window_frame)
                 .show(ui.ctx(), |ui| {
+                    let text = if simulation_paused { "Resume" } else { "Pause" };
+                    if ui.button(text).clicked() {
+                        simulation_paused = !simulation_paused;
+                    }
                     ui.add(
                         egui::Slider::new(
                             &mut simulation_speed,
@@ -821,8 +848,6 @@ impl State {
                         .text("Simulation Speed"),
                     );
                     ui.label(format!("{simulation_speed:.2}x"));
-                    ui.checkbox(&mut simulation_paused, "Pause");
-
                     ui.separator();
                     ui.heading("Orbits");
                     ui.checkbox(&mut orbits_visible, "Show orbits");
@@ -860,7 +885,8 @@ impl State {
                     });
                     apply_window_size = ui.button("Apply size").clicked();
                 });
-            show_selected_planet_window(ui.ctx(), &self.world, &self.physics, selected_planet);
+
+            show_selected_body_window(ui.ctx(), &mut self.world, &self.physics, selected_body);
         });
 
         self.simulation_speed = simulation_speed.clamp(MIN_SIMULATION_SPEED, MAX_SIMULATION_SPEED);
@@ -943,7 +969,7 @@ impl State {
                 &self.physics,
                 object_gpu.entity,
                 self.rotation_time,
-                self.selected_planet,
+                self.selected_body,
             );
             self.queue.write_buffer(
                 &object_gpu.object_buffer,
@@ -951,6 +977,14 @@ impl State {
                 bytemuck::cast_slice(&[uniform]),
             );
         }
+
+        self.planet_rings.update(
+            &self.queue,
+            &self.world,
+            &self.physics,
+            self.rotation_time,
+            self.selected_body,
+        );
 
         self.fps_overlay.update(
             &self.queue,
@@ -1002,6 +1036,8 @@ impl State {
                 multiview_mask: None,
             });
 
+            self.starfield.render(&mut pass, &self.camera_bind_group);
+
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
@@ -1012,6 +1048,9 @@ impl State {
                 .iter()
                 .filter(|object| self.world.kind(object.entity) == CelestialKind::Star)
             {
+                if self.selected_body == Some(object_gpu.entity) {
+                    continue;
+                }
                 pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
             }
@@ -1027,36 +1066,80 @@ impl State {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            for object_gpu in self.object_gpu.iter().filter(|object| {
-                matches!(
-                    self.world.kind(object.entity),
-                    CelestialKind::Planet | CelestialKind::Moon
-                )
-            }) {
+            for object_gpu in self
+                .object_gpu
+                .iter()
+                .filter(|object| self.world.kind(object.entity) == CelestialKind::Planet)
+            {
                 pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
             }
 
-            if let Some(selected_planet) = self.selected_planet {
+            pass.set_pipeline(&self.moon_pipeline);
+            for object_gpu in self
+                .object_gpu
+                .iter()
+                .filter(|object| self.world.kind(object.entity) == CelestialKind::Moon)
+            {
+                pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
+                pass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
+
+            if let Some(selected_body) = self.selected_body {
                 pass.set_pipeline(&self.screen_dim_pipeline);
                 pass.draw(0..3, 0..1);
+
+                if self.world.kind(selected_body) == CelestialKind::Star {
+                    pass.set_pipeline(&self.sun_focus_pipeline);
+                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                    pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    for object_gpu in self
+                        .object_gpu
+                        .iter()
+                        .filter(|object| object.entity == selected_body)
+                    {
+                        pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
+                        pass.draw_indexed(0..self.index_count, 0, 0..1);
+                    }
+                }
 
                 pass.set_pipeline(&self.planet_focus_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 for object_gpu in self.object_gpu.iter().filter(|object| {
-                    object.entity == selected_planet
-                        || (self.world.kind(object.entity) == CelestialKind::Moon
+                    object.entity == selected_body
+                        || (self.world.kind(selected_body) == CelestialKind::Moon
+                            && self.world.kind(object.entity) == CelestialKind::Planet
                             && self
                                 .world
-                                .parent(object.entity)
-                                .is_some_and(|parent| parent.entity == selected_planet))
+                                .parent(selected_body)
+                                .is_some_and(|parent| parent.entity == object.entity))
                 }) {
                     pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
                     pass.draw_indexed(0..self.index_count, 0, 0..1);
                 }
+
+                pass.set_pipeline(&self.moon_pipeline);
+                for object_gpu in self.object_gpu.iter().filter(|object| {
+                    object.entity == selected_body
+                        || (self.world.kind(selected_body) == CelestialKind::Planet
+                            && self.world.kind(object.entity) == CelestialKind::Moon
+                            && self
+                                .world
+                                .parent(object.entity)
+                                .is_some_and(|parent| parent.entity == selected_body))
+                }) {
+                    if self.world.kind(object_gpu.entity) == CelestialKind::Moon {
+                        pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
+                        pass.draw_indexed(0..self.index_count, 0, 0..1);
+                    }
+                }
             }
+
+            self.planet_rings
+                .render(&mut pass, &self.camera_bind_group);
 
             if self.fps_overlay.text_vertex_count > 0 {
                 pass.set_pipeline(&self.text_overlay_pipeline);
@@ -1099,5 +1182,15 @@ impl State {
         );
         frame.present();
         self.update_fps_counter(Instant::now());
+    }
+
+    pub fn wait_idle(&self) {
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
     }
 }

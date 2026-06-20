@@ -13,7 +13,7 @@ const GRAVITATIONAL_CONSTANT_AU3_SOLAR_MASS_YEAR2: f64 =
     GRAVITATIONAL_CONSTANT_M3_KG_S2 * SOLAR_MASS_KG * JULIAN_YEAR_SECONDS * JULIAN_YEAR_SECONDS
         / (ASTRONOMICAL_UNIT_METERS * ASTRONOMICAL_UNIT_METERS * ASTRONOMICAL_UNIT_METERS);
 const MAX_FRAME_SECONDS: f64 = 0.1;
-const MAX_STEPS_PER_FRAME: usize = 96;
+const MAX_STEPS_PER_FRAME: usize = 384;
 
 #[derive(Debug, Clone, Copy)]
 pub struct NBodyConfig {
@@ -25,8 +25,8 @@ pub struct NBodyConfig {
 impl Default for NBodyConfig {
     fn default() -> Self {
         Self {
-            years_per_second: 0.22,
-            fixed_step_years: 1.0 / 720.0,
+            years_per_second: 0.05,
+            fixed_step_years: 1.0 / 4096.0,
             softening_length: 0.0,
         }
     }
@@ -726,6 +726,7 @@ mod tests {
     #[test]
     fn default_config_uses_unsoftened_gravity() {
         assert_eq!(NBodyConfig::default().softening_length, 0.0);
+        assert_eq!(NBodyConfig::default().fixed_step_years, 1.0 / 4096.0);
     }
 
     #[test]
@@ -928,6 +929,7 @@ mod tests {
                 }),
             },
             atmosphere: None,
+            ring: None,
         }
     }
 
@@ -954,6 +956,7 @@ mod tests {
                 }),
             },
             atmosphere: None,
+            ring: None,
         }
     }
 
