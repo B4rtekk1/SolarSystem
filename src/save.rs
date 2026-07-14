@@ -21,6 +21,8 @@ pub struct SaveData {
     pub moon_orbits_visible: bool,
     pub orbit_thickness_scale: f32,
     pub selected_body: Option<Entity>,
+    #[serde(default)]
+    pub camera_follow_enabled: bool,
     pub initial_total_energy_by_entity: Vec<Option<f64>>,
     pub rotation_time: f32,
     pub window_width: u32,

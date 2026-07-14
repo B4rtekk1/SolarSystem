@@ -111,6 +111,10 @@ impl ApplicationHandler for App {
                     } else if key == KeyCode::F9 {
                         state.load_default();
                         state.window.request_redraw();
+                    } else if key == KeyCode::KeyC {
+                        if state.toggle_camera_follow() {
+                            state.window.request_redraw();
+                        }
                     } else if state.handle_shader_key(key) {
                         state.window.request_redraw();
                     }

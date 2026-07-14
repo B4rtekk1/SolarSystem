@@ -30,7 +30,7 @@ use crate::stars::Starfield;
 use crate::uniforms::{
     dvec3_to_vec3, entity_object_uniform, ray_sphere_distance, rendered_entity_position,
 };
-use crate::utils::{format_energy_joules, show_selected_body_window};
+use crate::utils::show_selected_body_window;
 use egui_wgpu::{
     Renderer as EguiRenderer, RendererOptions as EguiRendererOptions, ScreenDescriptor,
 };
@@ -135,6 +135,7 @@ pub struct State {
     moon_orbits_visible: bool,
     orbit_thickness_scale: f32,
     selected_body: Option<Entity>,
+    camera_follow_enabled: bool,
     initial_total_energy_by_entity: Vec<Option<f64>>,
     window_width_control: u32,
     window_height_control: u32,
@@ -535,6 +536,7 @@ impl State {
             moon_orbits_visible: true,
             orbit_thickness_scale: DEFAULT_ORBIT_THICKNESS_SCALE,
             selected_body: None,
+            camera_follow_enabled: false,
             initial_total_energy_by_entity,
             window_width_control: size.width,
             window_height_control: size.height,
@@ -640,6 +642,7 @@ impl State {
                 moon_orbits_visible: self.moon_orbits_visible,
                 orbit_thickness_scale: self.orbit_thickness_scale,
                 selected_body: self.selected_body,
+                camera_follow_enabled: self.camera_follow_enabled,
                 initial_total_energy_by_entity: self.initial_total_energy_by_entity.clone(),
                 rotation_time: self.rotation_time,
                 window_width: self.window_width_control,
@@ -673,6 +676,7 @@ impl State {
         self.selected_body = data
             .selected_body
             .filter(|entity| entity.index() < self.world.entity_capacity());
+        self.camera_follow_enabled = data.camera_follow_enabled && self.selected_body.is_some();
         self.initial_total_energy_by_entity = data.initial_total_energy_by_entity;
         if self.initial_total_energy_by_entity.len() != self.world.entity_capacity() {
             self.initial_total_energy_by_entity =
@@ -718,6 +722,7 @@ impl State {
     }
 
     pub fn pan_camera(&mut self, delta_x: f64, delta_y: f64) {
+        self.camera_follow_enabled = false;
         self.camera.pan(delta_x, delta_y, self.config.height);
     }
 
@@ -733,6 +738,7 @@ impl State {
         }
 
         self.selected_body = selected_body;
+        self.update_camera_follow_target();
         true
     }
 
@@ -742,7 +748,35 @@ impl State {
         }
 
         self.selected_body = None;
+        self.camera_follow_enabled = false;
         true
+    }
+
+    pub fn toggle_camera_follow(&mut self) -> bool {
+        if self.selected_body.is_none() {
+            return false;
+        }
+
+        self.camera_follow_enabled = !self.camera_follow_enabled;
+        self.update_camera_follow_target();
+        true
+    }
+
+    fn update_camera_follow_target(&mut self) {
+        if !self.camera_follow_enabled {
+            return;
+        }
+
+        let Some(selected_body) = self.selected_body else {
+            self.camera_follow_enabled = false;
+            return;
+        };
+
+        self.camera.set_target(rendered_entity_position(
+            &self.world,
+            &self.physics,
+            selected_body,
+        ));
     }
 
     fn pick_body(&self, cursor: (f64, f64)) -> Option<Entity> {
@@ -994,6 +1028,7 @@ impl State {
         let mut planet_orbits_visible = self.planet_orbits_visible;
         let mut moon_orbits_visible = self.moon_orbits_visible;
         let mut orbit_thickness_scale = self.orbit_thickness_scale;
+        let mut camera_follow_enabled = self.camera_follow_enabled;
         let mut window_width_control = self.window_width_control;
         let mut window_height_control = self.window_height_control;
         let mut apply_window_size = false;
@@ -1033,22 +1068,9 @@ impl State {
                     );
                     ui.label(format!("{simulation_speed:.2}x"));
                     ui.separator();
-                    ui.collapsing("Planet energy", |ui| {
-                        for planet in self.world.entities_of_kind(CelestialKind::Planet) {
-                            if let Some(energy) = self.physics.entity_energy(planet) {
-                                let delta = self
-                                    .initial_total_energy_by_entity
-                                    .get(planet.index())
-                                    .and_then(|energy| *energy)
-                                    .map(|initial| energy.total_joules() - initial);
-                                ui.label(format!(
-                                    "{}: {}  Δ {}",
-                                    self.world.name(planet),
-                                    format_energy_joules(energy.total_joules()),
-                                    delta.map_or_else(|| "N/A".to_string(), format_energy_joules)
-                                ));
-                            }
-                        }
+                    ui.heading("Camera");
+                    ui.add_enabled_ui(selected_body.is_some(), |ui| {
+                        ui.checkbox(&mut camera_follow_enabled, "Follow selected body");
                     });
                     ui.separator();
                     ui.heading("Orbits");
@@ -1120,6 +1142,8 @@ impl State {
         self.moon_orbits_visible = moon_orbits_visible;
         self.orbit_thickness_scale =
             orbit_thickness_scale.clamp(MIN_ORBIT_THICKNESS_SCALE, MAX_ORBIT_THICKNESS_SCALE);
+        self.camera_follow_enabled = camera_follow_enabled && self.selected_body.is_some();
+        self.update_camera_follow_target();
         self.window_width_control = window_width_control;
         self.window_height_control = window_height_control;
         if apply_window_size {
@@ -1171,6 +1195,7 @@ impl State {
                 .advance_scaled(frame_seconds, self.simulation_speed);
             self.update_orbit_trails();
         }
+        self.update_camera_follow_target();
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
