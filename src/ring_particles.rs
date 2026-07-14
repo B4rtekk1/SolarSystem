@@ -10,9 +10,9 @@ use std::f32::consts::TAU;
 use wgpu::util::DeviceExt;
 
 const DEFAULT_PARTICLE_COUNT: u32 = 2800;
-const MIN_PARTICLE_SIZE: f32 = 0.55;
-const MAX_PARTICLE_SIZE: f32 = 1.45;
-const RING_THICKNESS: f32 = 0.012;
+const MIN_PARTICLE_SIZE: f32 = 0.85;
+const MAX_PARTICLE_SIZE: f32 = 2.15;
+const RING_THICKNESS: f32 = 0.018;
 
 type RingParticle = [f32; 8];
 pub type RingUniform = [f32; 24];
@@ -238,8 +238,8 @@ fn create_ring_particles(ring: RingComponent, planet_radius: f32, seed: u32) -> 
 
             let band = (radial_t * 28.0 + angle * 2.4).sin() * 0.5 + 0.5;
             let gap = (radial_t * 52.0 - 0.35).sin() * 0.5 + 0.5;
-            let alpha = (0.10 + band * 0.28 + gap * 0.18).clamp(0.05, 0.72);
-            let tint = 0.82 + radial_t * 0.18;
+            let alpha = (0.20 + band * 0.36 + gap * 0.24).clamp(0.14, 0.88);
+            let tint = 0.95 + radial_t * 0.24;
 
             [
                 radius * angle.cos(),

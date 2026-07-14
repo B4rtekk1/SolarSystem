@@ -3,14 +3,15 @@ use crate::render_utils::{
 };
 use wgpu::util::DeviceExt;
 
-const FIELD_STAR_COUNT: usize = 3000;
-const GALAXY_STAR_COUNT: usize = 1100;
+const FIELD_STAR_COUNT: usize = 3800;
+const GALAXY_STAR_COUNT: usize = 2400;
+const NEBULA_CLOUD_COUNT: usize = 280;
 const STAR_RADIUS: f32 = 78.0;
 const MIN_STAR_SIZE_PIXELS: f32 = 0.8;
-const MAX_STAR_SIZE_PIXELS: f32 = 2.4;
+const MAX_STAR_SIZE_PIXELS: f32 = 2.8;
 const GALAXY_DISTANCE: f32 = 82.0;
-const GALAXY_WIDTH: f32 = 13.5;
-const GALAXY_HEIGHT: f32 = 4.6;
+const GALAXY_WIDTH: f32 = 25.0;
+const GALAXY_HEIGHT: f32 = 7.4;
 
 type Star = [f32; 8];
 
@@ -114,7 +115,7 @@ impl Starfield {
 }
 
 fn create_stars() -> Vec<Star> {
-    let mut stars = Vec::with_capacity(FIELD_STAR_COUNT + GALAXY_STAR_COUNT);
+    let mut stars = Vec::with_capacity(FIELD_STAR_COUNT + GALAXY_STAR_COUNT + NEBULA_CLOUD_COUNT);
 
     stars.extend((0..FIELD_STAR_COUNT).map(|index| {
         let u = random01(index as u32, 11);
@@ -153,25 +154,27 @@ fn create_stars() -> Vec<Star> {
     }));
 
     stars.extend((0..GALAXY_STAR_COUNT).map(create_galaxy_star));
+    stars.extend((0..NEBULA_CLOUD_COUNT).map(create_nebula_cloud));
     stars
 }
 
 fn create_galaxy_star(index: usize) -> Star {
     let index = index as u32;
-    let arm = (index % 3) as f32;
+    let arm = (index % 4) as f32;
     let spread = random01(index, 211);
     let twist = random01(index, 223);
     let cross = random01(index, 239) - 0.5;
     let haze = random01(index, 251) - 0.5;
     let brightness = random01(index, 263);
+    let tint = random01(index, 269);
 
-    let core_bias = spread.powf(1.9);
+    let core_bias = spread.powf(1.55);
     let disk_radius = GALAXY_WIDTH * core_bias;
-    let angle = arm * std::f32::consts::TAU / 3.0 + core_bias * 5.8 + twist * 0.55;
-    let disk_x = angle.cos() * disk_radius + cross * (0.7 + core_bias * 1.5);
-    let disk_y = angle.sin() * disk_radius * 0.34 + haze * GALAXY_HEIGHT * (1.0 - core_bias * 0.35);
+    let angle = arm * std::f32::consts::TAU / 4.0 + core_bias * 7.1 + twist * 0.72;
+    let disk_x = angle.cos() * disk_radius + cross * (1.0 + core_bias * 2.1);
+    let disk_y = angle.sin() * disk_radius * 0.27 + haze * GALAXY_HEIGHT * (1.0 - core_bias * 0.46);
 
-    let center = normalize3([-0.66, 0.31, -0.69]);
+    let center = normalize3([-0.62, 0.28, -0.73]);
     let right = normalize3([center[2], 0.0, -center[0]]);
     let up = normalize3(cross3(right, center));
     let position = add3(
@@ -185,10 +188,12 @@ fn create_galaxy_star(index: usize) -> Star {
         3.6,
         (core_glow * 0.65 + brightness * 0.35).clamp(0.0, 1.0),
     );
-    let alpha = (0.20 + brightness * 0.33 + core_glow * 0.42).clamp(0.0, 0.88);
+    let alpha = (0.18 + brightness * 0.42 + core_glow * 0.50).clamp(0.0, 0.95);
+    let magenta = smoothstep(0.20, 0.72, tint);
+    let cyan = 1.0 - smoothstep(0.36, 0.92, tint);
     let color = [
-        0.52 + core_glow * 0.42,
-        0.62 + brightness * 0.26,
+        0.46 + core_glow * 0.46 + magenta * 0.20,
+        0.58 + brightness * 0.24 + cyan * 0.16,
         0.92 + core_glow * 0.08,
         alpha,
     ];
@@ -198,6 +203,46 @@ fn create_galaxy_star(index: usize) -> Star {
         position[1],
         position[2],
         size,
+        color[0],
+        color[1],
+        color[2],
+        color[3],
+    ]
+}
+
+fn create_nebula_cloud(index: usize) -> Star {
+    let index = index as u32;
+    let along = random01(index, 307) * 2.0 - 1.0;
+    let lane = random01(index, 311) * 2.0 - 1.0;
+    let puff = random01(index, 313);
+    let depth = random01(index, 317) * 2.0 - 1.0;
+    let tint = random01(index, 331);
+
+    let center = normalize3([-0.62, 0.28, -0.73]);
+    let right = normalize3([center[2], 0.0, -center[0]]);
+    let up = normalize3(cross3(right, center));
+    let curve = along * along * along * 4.2;
+    let disk_x = along * GALAXY_WIDTH * 0.95 + curve + depth * 1.8;
+    let disk_y = lane * GALAXY_HEIGHT * (0.42 + puff * 0.38) + along.sin() * 1.3;
+    let position = add3(
+        scale3(center, GALAXY_DISTANCE - 1.5 + depth * 2.0),
+        add3(scale3(right, disk_x), scale3(up, disk_y)),
+    );
+
+    let center_glow = 1.0 - along.abs().min(1.0);
+    let alpha = 0.035 + center_glow * 0.07 + puff * 0.035;
+    let color = [
+        0.25 + tint * 0.35 + center_glow * 0.25,
+        0.34 + (1.0 - tint) * 0.24,
+        0.82 + puff * 0.15,
+        alpha.min(0.16),
+    ];
+
+    [
+        position[0],
+        position[1],
+        position[2],
+        mix(13.0, 38.0, puff),
         color[0],
         color[1],
         color[2],
@@ -217,6 +262,11 @@ fn random01(index: u32, salt: u32) -> f32 {
 
 fn mix(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {

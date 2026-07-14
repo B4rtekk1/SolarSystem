@@ -63,5 +63,6 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let glow = 1.0 - smoothstep(thickness * 0.5, thickness, dist);
 
     let alpha = in.color.a * glow;
-    return vec4<f32>(in.color.rgb * alpha, alpha);
+    let brightness = 1.35;
+    return vec4<f32>(in.color.rgb * brightness, alpha);
 }

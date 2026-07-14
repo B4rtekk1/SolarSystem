@@ -46,6 +46,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let glow = 1.0 - smoothstep(0.0, 1.0, length(in.local));
-    return vec4<f32>(in.color.rgb * in.color.a, in.color.a * glow);
+    let radius = length(in.local);
+    let core = 1.0 - smoothstep(0.0, 0.34, radius);
+    let halo = 1.0 - smoothstep(0.16, 1.0, radius);
+    let dust = pow(max(1.0 - radius, 0.0), 2.2);
+    let glow = max(core, halo * 0.62 + dust * 0.38);
+    let sparkle = 1.0 + core * 0.65;
+    let color = in.color.rgb * sparkle;
+    return vec4<f32>(color, in.color.a * glow);
 }
