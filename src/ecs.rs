@@ -1,6 +1,7 @@
 use crate::{color::Color, orbit::Orbit};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Entity(usize);
 
 impl Entity {
@@ -14,24 +15,24 @@ impl Entity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CelestialKind {
     Star,
     Planet,
     Moon,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NameComponent {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ParentComponent {
     pub entity: Entity,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BodyComponent {
     pub mass: f32,
     pub radius_km: f32,
@@ -60,12 +61,12 @@ fn render_radius_from_km(radius_km: f32) -> f32 {
     (MIN_RENDER_RADIUS + earth_radii.sqrt() * EARTH_RENDER_RADIUS).min(MAX_RENDER_RADIUS)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RotationComponent {
     pub speed: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct AtmosphereComponent {
     pub color: Color,
     pub density: f32,
@@ -82,7 +83,7 @@ impl AtmosphereComponent {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RingComponent {
     pub inner_radius_multiplier: f32,
     pub outer_radius_multiplier: f32,
@@ -112,7 +113,7 @@ impl RingComponent {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct StarMaterial {
     pub base_color: Color,
     pub accent_color: Color,
@@ -120,7 +121,7 @@ pub struct StarMaterial {
     pub surface_temperature: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SurfaceMaterial {
     pub base_color: Color,
     pub accent_color: Color,
@@ -128,18 +129,18 @@ pub struct SurfaceMaterial {
     pub metallic: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum MaterialComponent {
     Star(StarMaterial),
     Surface(SurfaceMaterial),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RenderComponent {
     pub material: MaterialComponent,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectBundle {
     pub name: String,
     pub kind: CelestialKind,
@@ -151,7 +152,7 @@ pub struct ObjectBundle {
     pub ring: Option<RingComponent>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct World {
     names: Vec<NameComponent>,
     kinds: Vec<CelestialKind>,

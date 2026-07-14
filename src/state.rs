@@ -24,6 +24,7 @@ use crate::render_utils::{
     create_depth_target, create_msaa_target, depth_stencil_state, uniform_buffer_layout_entry,
 };
 use crate::ring_particles::PlanetRingSystem;
+use crate::save::{SaveData, load_from_file, save_to_file};
 use crate::scene::create_world;
 use crate::stars::Starfield;
 use crate::uniforms::{
@@ -35,7 +36,9 @@ use egui_wgpu::{
 };
 use egui_winit::State as EguiWinitState;
 use glam::{DVec3, Vec3};
+use rfd::FileDialog;
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use wgpu::Surface;
@@ -58,6 +61,7 @@ const CONTROLS_PANEL_DEFAULT_WIDTH: f32 = 300.0;
 const CONTROLS_PANEL_DEFAULT_HEIGHT: f32 = 360.0;
 const CONTROLS_PANEL_MIN_WIDTH: f32 = 240.0;
 const CONTROLS_PANEL_MIN_HEIGHT: f32 = 120.0;
+const DEFAULT_SAVE_PATH: &str = "solar_system.orbs";
 
 fn initial_total_energy_by_entity(world: &World, physics: &NBodySimulation) -> Vec<Option<f64>> {
     let mut energies = vec![None; world.entity_capacity()];
@@ -68,6 +72,13 @@ fn initial_total_energy_by_entity(world: &World, physics: &NBodySimulation) -> V
         });
     }
     energies
+}
+
+fn with_orbs_extension(mut path: PathBuf) -> PathBuf {
+    if path.extension().is_none() {
+        path.set_extension("orbs");
+    }
+    path
 }
 
 pub struct State {
@@ -127,6 +138,7 @@ pub struct State {
     initial_total_energy_by_entity: Vec<Option<f64>>,
     window_width_control: u32,
     window_height_control: u32,
+    save_status: Option<String>,
 }
 
 impl State {
@@ -526,6 +538,7 @@ impl State {
             initial_total_energy_by_entity,
             window_width_control: size.width,
             window_height_control: size.height,
+            save_status: None,
         }
     }
 
@@ -541,6 +554,151 @@ impl State {
         self.depth = create_depth_target(&self.device, width, height);
         self.window_width_control = width;
         self.window_height_control = height;
+    }
+
+    pub fn save_default(&mut self) -> bool {
+        match self.save_to_path(DEFAULT_SAVE_PATH) {
+            Ok(()) => {
+                self.save_status = Some(format!("Saved to {DEFAULT_SAVE_PATH}"));
+                true
+            }
+            Err(error) => {
+                self.save_status = Some(format!("Save failed: {error}"));
+                false
+            }
+        }
+    }
+
+    pub fn load_default(&mut self) -> bool {
+        match self.load_from_path(DEFAULT_SAVE_PATH) {
+            Ok(()) => {
+                self.save_status = Some(format!("Loaded from {DEFAULT_SAVE_PATH}"));
+                true
+            }
+            Err(error) => {
+                self.save_status = Some(format!("Load failed: {error}"));
+                false
+            }
+        }
+    }
+
+    pub fn save_as_dialog(&mut self) -> bool {
+        let Some(path) = FileDialog::new()
+            .add_filter("ORBS save", &["orbs"])
+            .set_file_name(DEFAULT_SAVE_PATH)
+            .save_file()
+        else {
+            self.save_status = Some("Save canceled".to_string());
+            return false;
+        };
+
+        let path = with_orbs_extension(path);
+        match self.save_to_path(&path) {
+            Ok(()) => {
+                self.save_status = Some(format!("Saved to {}", path.display()));
+                true
+            }
+            Err(error) => {
+                self.save_status = Some(format!("Save failed: {error}"));
+                false
+            }
+        }
+    }
+
+    pub fn load_dialog(&mut self) -> bool {
+        let Some(path) = FileDialog::new()
+            .add_filter("ORBS save", &["orbs"])
+            .pick_file()
+        else {
+            self.save_status = Some("Load canceled".to_string());
+            return false;
+        };
+
+        match self.load_from_path(&path) {
+            Ok(()) => {
+                self.save_status = Some(format!("Loaded from {}", path.display()));
+                true
+            }
+            Err(error) => {
+                self.save_status = Some(format!("Load failed: {error}"));
+                false
+            }
+        }
+    }
+
+    fn save_to_path(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        save_to_file(
+            path,
+            &SaveData {
+                world: self.world.clone(),
+                physics: self.physics.clone(),
+                camera: self.camera.clone(),
+                simulation_speed: self.simulation_speed,
+                simulation_paused: self.simulation_paused,
+                orbits_visible: self.orbits_visible,
+                planet_orbits_visible: self.planet_orbits_visible,
+                moon_orbits_visible: self.moon_orbits_visible,
+                orbit_thickness_scale: self.orbit_thickness_scale,
+                selected_body: self.selected_body,
+                initial_total_energy_by_entity: self.initial_total_energy_by_entity.clone(),
+                rotation_time: self.rotation_time,
+                window_width: self.window_width_control,
+                window_height: self.window_height_control,
+            },
+        )
+    }
+
+    fn load_from_path(&mut self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        let data = load_from_file(path)?;
+        if data.world.entity_capacity() != self.object_gpu.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Saved world is incompatible with the current renderer",
+            ));
+        }
+
+        self.world = data.world;
+        self.physics = data.physics;
+        self.camera = data.camera;
+        self.simulation_speed = data
+            .simulation_speed
+            .clamp(MIN_SIMULATION_SPEED, MAX_SIMULATION_SPEED);
+        self.simulation_paused = data.simulation_paused;
+        self.orbits_visible = data.orbits_visible;
+        self.planet_orbits_visible = data.planet_orbits_visible;
+        self.moon_orbits_visible = data.moon_orbits_visible;
+        self.orbit_thickness_scale = data
+            .orbit_thickness_scale
+            .clamp(MIN_ORBIT_THICKNESS_SCALE, MAX_ORBIT_THICKNESS_SCALE);
+        self.selected_body = data
+            .selected_body
+            .filter(|entity| entity.index() < self.world.entity_capacity());
+        self.initial_total_energy_by_entity = data.initial_total_energy_by_entity;
+        if self.initial_total_energy_by_entity.len() != self.world.entity_capacity() {
+            self.initial_total_energy_by_entity =
+                initial_total_energy_by_entity(&self.world, &self.physics);
+        }
+        self.rotation_time = data.rotation_time;
+        self.window_width_control = data
+            .window_width
+            .clamp(MIN_WINDOW_CONTROL_WIDTH, MAX_WINDOW_CONTROL_WIDTH);
+        self.window_height_control = data
+            .window_height
+            .clamp(MIN_WINDOW_CONTROL_HEIGHT, MAX_WINDOW_CONTROL_HEIGHT);
+
+        self.orbit_trails = create_orbit_trails(&self.physics);
+        self.orbit_forecasts = self
+            .physics
+            .forecast_full_planet_orbits(ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS);
+        self.moon_orbit_offsets = self.physics.forecast_full_moon_orbit_offsets(
+            MOON_ORBIT_FORECAST_MAX_POINTS,
+            MOON_ORBIT_FORECAST_SAMPLE_YEARS,
+        );
+        self.last_physics_update = Instant::now();
+        self.last_orbit_sample_year = self.physics.elapsed_years();
+        self.last_orbit_forecast_request = Instant::now();
+        self.orbit_segments_dirty = true;
+        Ok(())
     }
 
     fn request_window_size(&mut self, width: u32, height: u32) {
@@ -839,6 +997,10 @@ impl State {
         let mut window_width_control = self.window_width_control;
         let mut window_height_control = self.window_height_control;
         let mut apply_window_size = false;
+        let mut save_requested = false;
+        let mut load_requested = false;
+        let mut save_as_requested = false;
+        let mut load_file_requested = false;
         let selected_body = self.selected_body;
 
         let full_output = egui_ctx.run_ui(raw_input, |ui| {
@@ -924,6 +1086,19 @@ impl State {
                         );
                     });
                     apply_window_size = ui.button("Apply size").clicked();
+                    ui.separator();
+                    ui.heading("Save");
+                    ui.horizontal(|ui| {
+                        save_requested = ui.button("Save").clicked();
+                        load_requested = ui.button("Load").clicked();
+                    });
+                    ui.horizontal(|ui| {
+                        save_as_requested = ui.button("Save As").clicked();
+                        load_file_requested = ui.button("Load File").clicked();
+                    });
+                    if let Some(status) = &self.save_status {
+                        ui.label(status);
+                    }
                 });
 
             let selected_initial_total_energy = selected_body
@@ -949,6 +1124,18 @@ impl State {
         self.window_height_control = window_height_control;
         if apply_window_size {
             self.request_window_size(window_width_control, window_height_control);
+        }
+        if save_requested {
+            self.save_default();
+        }
+        if load_requested {
+            self.load_default();
+        }
+        if save_as_requested {
+            self.save_as_dialog();
+        }
+        if load_file_requested {
+            self.load_dialog();
         }
 
         let egui::FullOutput {

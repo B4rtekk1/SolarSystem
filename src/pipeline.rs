@@ -42,8 +42,8 @@ pub fn create_sphere_overlay_pipeline(
         shader,
         sample_count,
         label,
-        false,
-        wgpu::CompareFunction::Always,
+        true,
+        wgpu::CompareFunction::LessEqual,
     )
 }
 

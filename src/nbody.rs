@@ -3,6 +3,7 @@ use crate::{
     orbit::Orbit,
 };
 use glam::DVec3;
+use serde::{Deserialize, Serialize};
 use std::f64::consts::TAU;
 
 const GRAVITATIONAL_CONSTANT_M3_KG_S2: f64 = 6.674_30e-11;
@@ -15,7 +16,7 @@ const GRAVITATIONAL_CONSTANT_AU3_SOLAR_MASS_YEAR2: f64 =
 const MAX_FRAME_SECONDS: f64 = 0.1;
 const MAX_STEPS_PER_FRAME: usize = 384;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NBodyConfig {
     pub years_per_second: f64,
     pub fixed_step_years: f64,
@@ -25,21 +26,23 @@ pub struct NBodyConfig {
 impl Default for NBodyConfig {
     fn default() -> Self {
         Self {
-            years_per_second: 0.05,
+            // Keep the default visual pace low enough that short moon orbits
+            // do not race around their planets.
+            years_per_second: 0.01,
             fixed_step_years: 1.0 / 4096.0,
             softening_length: 0.0,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Body {
     mass: f64,
     position: DVec3,
     velocity: DVec3,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct EnergySnapshot {
     pub kinetic_joules: f64,
     pub potential_joules: f64,
@@ -59,13 +62,13 @@ struct OrbitForecastTracker {
     complete: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct MoonOrbitTarget {
     entity: Entity,
     parent: Entity,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NBodySimulation {
     bodies: Vec<Body>,
     body_index_by_entity: Vec<Option<usize>>,
@@ -808,6 +811,7 @@ mod tests {
 
     #[test]
     fn default_config_uses_unsoftened_gravity() {
+        assert_eq!(NBodyConfig::default().years_per_second, 0.01);
         assert_eq!(NBodyConfig::default().softening_length, 0.0);
         assert_eq!(NBodyConfig::default().fixed_step_years, 1.0 / 4096.0);
     }

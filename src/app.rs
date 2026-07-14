@@ -105,6 +105,12 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     if key == KeyCode::F11 {
                         state.toggle_borderless_fullscreen();
+                    } else if key == KeyCode::F5 {
+                        state.save_default();
+                        state.window.request_redraw();
+                    } else if key == KeyCode::F9 {
+                        state.load_default();
+                        state.window.request_redraw();
                     } else if state.handle_shader_key(key) {
                         state.window.request_redraw();
                     }

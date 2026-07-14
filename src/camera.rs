@@ -3,8 +3,10 @@ use crate::constants::{
     PAN_SPEED, ZOOM_SPEED,
 };
 use glam::{Mat4, Vec3};
+use serde::{Deserialize, Serialize};
 use std::f32::consts::TAU;
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Camera {
     yaw: f32,
     pitch: f32,
@@ -26,6 +28,10 @@ impl Default for Camera {
 impl Camera {
     pub fn distance(&self) -> f32 {
         self.distance
+    }
+
+    pub fn set_target(&mut self, target: Vec3) {
+        self.target = target;
     }
 
     pub fn orbit(&mut self, delta_x: f64, delta_y: f64) {
