@@ -248,6 +248,10 @@ impl World {
         self.rings[entity.index()]
     }
 
+    pub fn ring_mut(&mut self, entity: Entity) -> &mut Option<RingComponent> {
+        &mut self.rings[entity.index()]
+    }
+
     pub fn surface_material(&self, entity: Entity) -> Option<SurfaceMaterial> {
         match self.renders[entity.index()].material {
             MaterialComponent::Surface(material) => Some(material),

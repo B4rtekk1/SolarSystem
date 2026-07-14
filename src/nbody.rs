@@ -26,10 +26,13 @@ pub struct NBodyConfig {
 impl Default for NBodyConfig {
     fn default() -> Self {
         Self {
-            // Keep the default visual pace low enough that short moon orbits
-            // do not race around their planets.
-            years_per_second: 0.01,
-            fixed_step_years: 1.0 / 4096.0,
+            // Keep the default visual pace low enough for short real moon
+            // orbits while still allowing the UI speed multiplier to accelerate
+            // the broader planetary system.
+            years_per_second: 0.00025,
+            // About 32 minutes per step: enough to resolve the innermost
+            // real moons substantially better than the previous two-hour step.
+            fixed_step_years: 1.0 / 16_384.0,
             softening_length: 0.0,
         }
     }
@@ -76,6 +79,8 @@ pub struct NBodySimulation {
     moon_orbits: Vec<MoonOrbitTarget>,
     current_accelerations: Vec<DVec3>,
     next_accelerations: Vec<DVec3>,
+    #[serde(default)]
+    accelerations_valid: bool,
     config: NBodyConfig,
     accumulator_years: f64,
     elapsed_years: f64,
@@ -177,6 +182,7 @@ impl NBodySimulation {
             moon_orbits,
             current_accelerations: vec![DVec3::ZERO; acceleration_buffer_len],
             next_accelerations: vec![DVec3::ZERO; acceleration_buffer_len],
+            accelerations_valid: false,
             config,
             accumulator_years: 0.0,
             elapsed_years: 0.0,
@@ -257,8 +263,11 @@ impl NBodySimulation {
             .map_or(DVec3::ZERO, |entity| self.position(*entity))
     }
 
-    pub fn elapsed_years(&self) -> f64 {
-        self.elapsed_years
+    pub fn reset_visual_pacing_to_defaults(&mut self) {
+        let default_config = NBodyConfig::default();
+        self.config.years_per_second = default_config.years_per_second;
+        self.config.fixed_step_years = default_config.fixed_step_years;
+        self.accumulator_years = self.accumulator_years.min(self.config.fixed_step_years);
     }
 
     pub fn energy(&self) -> EnergySnapshot {
@@ -436,79 +445,16 @@ impl NBodySimulation {
         forecast
     }
 
-    pub fn forecast_full_moon_orbit_offsets(
-        &self,
-        max_sample_count: usize,
-        sample_interval_years: f64,
-    ) -> Vec<(Entity, Vec<DVec3>)> {
-        let mut forecast = self
-            .moon_orbits
-            .iter()
-            .map(|target| {
-                let mut path = Vec::with_capacity(max_sample_count + 1);
-                path.push(self.position(target.entity) - self.position(target.parent));
-                (target.entity, path)
-            })
-            .collect::<Vec<_>>();
-
-        if max_sample_count == 0
-            || !sample_interval_years.is_finite()
-            || sample_interval_years <= 0.0
-        {
-            return forecast;
-        }
-
-        let mut simulation = self.clone();
-        simulation.accumulator_years = 0.0;
-        let mut trackers = self.create_moon_forecast_trackers();
-
-        for _ in 0..max_sample_count {
-            simulation.advance_years(sample_interval_years);
-
-            for ((target, (_, path)), tracker) in self
-                .moon_orbits
-                .iter()
-                .zip(forecast.iter_mut())
-                .zip(trackers.iter_mut())
-            {
-                if tracker.complete {
-                    continue;
-                }
-
-                let relative_position =
-                    simulation.position(target.entity) - simulation.position(target.parent);
-                let direction = projected_direction(
-                    relative_position,
-                    tracker.normal,
-                    tracker.previous_direction,
-                );
-                let delta_angle =
-                    signed_angle(tracker.previous_direction, direction, tracker.normal);
-
-                tracker.accumulated_angle += delta_angle.max(0.0);
-                tracker.previous_direction = direction;
-                path.push(relative_position);
-
-                if tracker.accumulated_angle >= TAU {
-                    tracker.complete = true;
-                }
-            }
-
-            if trackers.iter().all(|tracker| tracker.complete) {
-                break;
-            }
-        }
-
-        forecast
-    }
-
     fn step(&mut self, dt: f64) {
         self.ensure_acceleration_buffers();
-        write_accelerations(
-            &self.bodies,
-            self.config.softening_length,
-            &mut self.current_accelerations,
-        );
+        if !self.accelerations_valid {
+            write_accelerations(
+                &self.bodies,
+                self.config.softening_length,
+                &mut self.current_accelerations,
+            );
+            self.accelerations_valid = true;
+        }
         let half_dt_squared = 0.5 * dt * dt;
 
         for (body, acceleration) in self
@@ -532,6 +478,14 @@ impl NBodySimulation {
         {
             body.velocity += (*current + *next) * (0.5 * dt);
         }
+
+        // In velocity Verlet the acceleration at the end of this step is the
+        // acceleration at the beginning of the next one. Reusing it cuts the
+        // dominant O(n²) force calculation almost in half.
+        std::mem::swap(
+            &mut self.current_accelerations,
+            &mut self.next_accelerations,
+        );
 
         self.elapsed_years += dt;
     }
@@ -737,8 +691,21 @@ fn orbit_position_from_plane(orbit: &Orbit, x: f64, z: f64) -> DVec3 {
 }
 
 fn orbit_vector_from_plane(orbit: &Orbit, x: f64, z: f64) -> DVec3 {
+    let (sin_periapsis, cos_periapsis) = (orbit.argument_of_periapsis as f64).sin_cos();
+    let periapsis_x = x * cos_periapsis - z * sin_periapsis;
+    let periapsis_z = x * sin_periapsis + z * cos_periapsis;
     let (sin_inclination, cos_inclination) = (orbit.inclination as f64).sin_cos();
-    DVec3::new(x, -z * sin_inclination, z * cos_inclination)
+    let inclined = DVec3::new(
+        periapsis_x,
+        -periapsis_z * sin_inclination,
+        periapsis_z * cos_inclination,
+    );
+    let (sin_node, cos_node) = (orbit.ascending_node as f64).sin_cos();
+    DVec3::new(
+        inclined.x * cos_node + inclined.z * sin_node,
+        inclined.y,
+        -inclined.x * sin_node + inclined.z * cos_node,
+    )
 }
 
 fn projected_direction(vector: DVec3, normal: DVec3, fallback: DVec3) -> DVec3 {
@@ -797,6 +764,7 @@ mod tests {
             moon_orbits: Vec::new(),
             current_accelerations: vec![DVec3::ZERO; 2],
             next_accelerations: vec![DVec3::ZERO; 2],
+            accelerations_valid: false,
             config,
             accumulator_years: 0.0,
             elapsed_years: 0.0,
@@ -811,9 +779,9 @@ mod tests {
 
     #[test]
     fn default_config_uses_unsoftened_gravity() {
-        assert_eq!(NBodyConfig::default().years_per_second, 0.01);
+        assert_eq!(NBodyConfig::default().years_per_second, 0.00025);
         assert_eq!(NBodyConfig::default().softening_length, 0.0);
-        assert_eq!(NBodyConfig::default().fixed_step_years, 1.0 / 4096.0);
+        assert_eq!(NBodyConfig::default().fixed_step_years, 1.0 / 16_384.0);
     }
 
     #[test]
@@ -863,6 +831,7 @@ mod tests {
             moon_orbits: Vec::new(),
             current_accelerations: vec![DVec3::ZERO; 2],
             next_accelerations: vec![DVec3::ZERO; 2],
+            accelerations_valid: false,
             config: NBodyConfig {
                 years_per_second: 1.0,
                 fixed_step_years: 0.01,
@@ -905,6 +874,7 @@ mod tests {
             moon_orbits: Vec::new(),
             current_accelerations: vec![DVec3::ZERO; 2],
             next_accelerations: vec![DVec3::ZERO; 2],
+            accelerations_valid: false,
             config: NBodyConfig {
                 years_per_second: 1.0,
                 fixed_step_years: 0.01,
@@ -953,6 +923,7 @@ mod tests {
             moon_orbits: Vec::new(),
             current_accelerations: vec![DVec3::ZERO],
             next_accelerations: vec![DVec3::ZERO],
+            accelerations_valid: false,
             config: NBodyConfig {
                 years_per_second: 1.0,
                 fixed_step_years: 1.0,
@@ -989,6 +960,7 @@ mod tests {
             moon_orbits: Vec::new(),
             current_accelerations: vec![DVec3::ZERO; 2],
             next_accelerations: vec![DVec3::ZERO; 2],
+            accelerations_valid: false,
             config: NBodyConfig {
                 years_per_second: 1.0,
                 fixed_step_years: 1.0 / 2048.0,
@@ -1026,6 +998,7 @@ mod tests {
             moon_orbits: Vec::new(),
             current_accelerations: vec![DVec3::ZERO; 2],
             next_accelerations: vec![DVec3::ZERO; 2],
+            accelerations_valid: false,
             config: NBodyConfig {
                 years_per_second: 1.0,
                 fixed_step_years: 1.0 / 2048.0,

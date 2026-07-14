@@ -7,6 +7,12 @@ pub struct Orbit {
     pub semi_minor_axis: f32,
     pub angular_speed: f32,
     pub phase: f32,
+    /// Longitude of the ascending node, in radians, in the reference plane.
+    #[serde(default)]
+    pub ascending_node: f32,
+    /// Argument of periapsis, in radians, measured in the orbital plane.
+    #[serde(default)]
+    pub argument_of_periapsis: f32,
     pub inclination: f32,
 }
 
@@ -22,6 +28,8 @@ impl Orbit {
             semi_minor_axis,
             angular_speed,
             phase: 0.0,
+            ascending_node: 0.0,
+            argument_of_periapsis: 0.0,
             inclination: 0.0,
         }
     }

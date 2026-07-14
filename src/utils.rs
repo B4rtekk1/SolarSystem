@@ -155,25 +155,36 @@ pub fn show_selected_body_window(
                     let parent_velocity = physics.velocity(parent);
 
                     let parent_distance = (position - parent_position).length();
-
+                    let parent_relative_velocity = velocity - parent_velocity;
                     let parent_relative_speed =
-                        (velocity - parent_velocity).length() * AU_PER_YEAR_TO_KM_PER_SECOND;
+                        parent_relative_velocity.length() * AU_PER_YEAR_TO_KM_PER_SECOND;
+                    let parent_relative_speed_au_per_year = parent_relative_velocity.length();
 
                     ui.label(format!("Parent planet: {}", world.name(parent)));
+                    ui.label(format!("Orbital speed around parent: {parent_relative_speed:.2} km/s"));
+                    ui.label(format!(
+                        "Parent-relative speed: {parent_relative_speed_au_per_year:.3} AU/year"
+                    ));
 
                     ui.label(format!(
                         "Distance from parent: {parent_distance:.4} AU ({})",
                         format_km(au_to_km(parent_distance))
                     ));
 
-                    ui.label(format!("Relative speed: {parent_relative_speed:.2} km/s"));
+                    ui.separator();
+                    ui.label(format!(
+                        "Solar-system velocity: {speed_km_per_second:.2} km/s"
+                    ));
+                    ui.label(format!(
+                        "Solar-system speed: {speed_au_per_year:.3} AU/year"
+                    ));
 
                     ui.separator();
                 }
+            } else {
+                ui.label(format!("Velocity: {speed_km_per_second:.2} km/s"));
+                ui.label(format!("Orbital speed: {speed_au_per_year:.3} AU/year"));
             }
-
-            ui.label(format!("Velocity: {speed_km_per_second:.2} km/s"));
-            ui.label(format!("Orbital speed: {speed_au_per_year:.3} AU/year"));
 
             ui.label(format!(
                 "Distance from the star: {sun_distance:.3} AU ({})",

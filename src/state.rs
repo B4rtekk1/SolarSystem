@@ -1,19 +1,16 @@
 use crate::camera::Camera;
 use crate::constants::{
     DEFAULT_ORBIT_THICKNESS_SCALE, DEFAULT_SIMULATION_SPEED, MAX_ORBIT_THICKNESS_SCALE,
-    MAX_SIMULATION_SPEED, MIN_ORBIT_THICKNESS_SCALE, MIN_SIMULATION_SPEED,
-    MOON_ORBIT_FORECAST_MAX_POINTS, MOON_ORBIT_FORECAST_SAMPLE_YEARS, MSAA_SAMPLE_COUNT,
-    ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS, ORBIT_FORECAST_UPDATE_INTERVAL_SECONDS,
-    ORBIT_TRAIL_POINTS, ORBIT_TRAIL_SAMPLE_YEARS, OrbitSegment, SPHERE_LATITUDES,
-    SPHERE_LONGITUDES,
+    MAX_SIMULATION_SPEED, MIN_ORBIT_THICKNESS_SCALE, MIN_SIMULATION_SPEED, MSAA_SAMPLE_COUNT,
+    OrbitSegment, SPHERE_LATITUDES, SPHERE_LONGITUDES,
 };
 use crate::ecs::{CelestialKind, Entity, World};
 use crate::fps_overlay::FpsOverlay;
 use crate::geometry::create_sphere;
 use crate::nbody::{NBodyConfig, NBodySimulation};
 use crate::orbit_render::{
-    OrbitForecastWorker, build_orbit_segments, create_orbit_trails, max_orbit_segment_count,
-    orbit_draw_vertex_count, orbit_width_scale,
+    build_kepler_orbit_segments, max_orbit_segment_count, orbit_draw_vertex_count,
+    orbit_width_scale,
 };
 use crate::pipeline::{
     create_screen_dim_pipeline, create_sphere_overlay_pipeline, create_sphere_pipeline,
@@ -27,17 +24,13 @@ use crate::ring_particles::PlanetRingSystem;
 use crate::save::{SaveData, load_from_file, save_to_file};
 use crate::scene::create_world;
 use crate::stars::Starfield;
-use crate::uniforms::{
-    dvec3_to_vec3, entity_object_uniform, ray_sphere_distance, rendered_entity_position,
-};
+use crate::uniforms::{entity_object_uniform, ray_sphere_distance, rendered_entity_position};
 use crate::utils::show_selected_body_window;
 use egui_wgpu::{
     Renderer as EguiRenderer, RendererOptions as EguiRendererOptions, ScreenDescriptor,
 };
 use egui_winit::State as EguiWinitState;
-use glam::{DVec3, Vec3};
 use rfd::FileDialog;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -115,16 +108,9 @@ pub struct State {
     camera: Camera,
     world: World,
     physics: NBodySimulation,
-    orbit_trails: Vec<VecDeque<Vec3>>,
-    orbit_forecasts: Vec<Vec<DVec3>>,
-    moon_orbit_offsets: Vec<(Entity, Vec<DVec3>)>,
     orbit_segments: Vec<OrbitSegment>,
-    forecast_worker: OrbitForecastWorker,
     last_physics_update: Instant,
     rotation_time: f32,
-    last_orbit_sample_year: f64,
-    last_orbit_forecast_request: Instant,
-    orbit_segments_dirty: bool,
     fps_frame_count: u32,
     fps_last_update: Instant,
     current_fps: f64,
@@ -270,7 +256,6 @@ impl State {
         let world = create_world();
         let physics = NBodySimulation::from_world(&world, NBodyConfig::default());
         let initial_total_energy_by_entity = initial_total_energy_by_entity(&world, &physics);
-        let orbit_trails = create_orbit_trails(&physics);
 
         let mut object_gpu = Vec::with_capacity(world.entity_capacity());
         for entity in world.entities() {
@@ -303,20 +288,11 @@ impl State {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let orbit_forecasts = physics
-            .forecast_full_planet_orbits(ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS);
-        let moon_orbit_offsets = physics.forecast_full_moon_orbit_offsets(
-            MOON_ORBIT_FORECAST_MAX_POINTS,
-            MOON_ORBIT_FORECAST_SAMPLE_YEARS,
-        );
         let mut orbit_segments = Vec::with_capacity(max_orbit_segment_count(
             &world,
             physics.planet_entities().len(),
         ));
-        build_orbit_segments(
-            &orbit_trails,
-            &orbit_forecasts,
-            &moon_orbit_offsets,
+        build_kepler_orbit_segments(
             &world,
             &physics,
             physics.planet_entities(),
@@ -479,7 +455,6 @@ impl State {
             Some(device.limits().max_texture_dimension_2d as usize),
         );
         let egui_renderer = EguiRenderer::new(&device, format, EguiRendererOptions::default());
-        let forecast_worker = OrbitForecastWorker::new();
         let now = Instant::now();
 
         Self {
@@ -516,16 +491,9 @@ impl State {
             camera,
             world,
             physics,
-            orbit_trails,
-            orbit_forecasts,
-            moon_orbit_offsets,
             orbit_segments,
-            forecast_worker,
             last_physics_update: now,
             rotation_time: 0.0,
-            last_orbit_sample_year: 0.0,
-            last_orbit_forecast_request: now,
-            orbit_segments_dirty: false,
             fps_frame_count: 0,
             fps_last_update: now,
             current_fps: 0.0,
@@ -662,6 +630,7 @@ impl State {
 
         self.world = data.world;
         self.physics = data.physics;
+        self.physics.reset_visual_pacing_to_defaults();
         self.camera = data.camera;
         self.simulation_speed = data
             .simulation_speed
@@ -690,18 +659,7 @@ impl State {
             .window_height
             .clamp(MIN_WINDOW_CONTROL_HEIGHT, MAX_WINDOW_CONTROL_HEIGHT);
 
-        self.orbit_trails = create_orbit_trails(&self.physics);
-        self.orbit_forecasts = self
-            .physics
-            .forecast_full_planet_orbits(ORBIT_FORECAST_MAX_POINTS, ORBIT_FORECAST_SAMPLE_YEARS);
-        self.moon_orbit_offsets = self.physics.forecast_full_moon_orbit_offsets(
-            MOON_ORBIT_FORECAST_MAX_POINTS,
-            MOON_ORBIT_FORECAST_SAMPLE_YEARS,
-        );
         self.last_physics_update = Instant::now();
-        self.last_orbit_sample_year = self.physics.elapsed_years();
-        self.last_orbit_forecast_request = Instant::now();
-        self.orbit_segments_dirty = true;
         Ok(())
     }
 
@@ -728,7 +686,6 @@ impl State {
 
     pub fn zoom_camera(&mut self, scroll_delta: f32) {
         self.camera.zoom(scroll_delta);
-        self.orbit_segments_dirty = true;
     }
 
     pub fn select_body_at(&mut self, cursor: (f64, f64)) -> bool {
@@ -818,53 +775,9 @@ impl State {
         closest.map(|(entity, _)| entity)
     }
 
-    fn update_orbit_trails(&mut self) -> bool {
-        let elapsed_years = self.physics.elapsed_years();
-        if elapsed_years - self.last_orbit_sample_year < ORBIT_TRAIL_SAMPLE_YEARS {
-            return false;
-        }
-
-        self.last_orbit_sample_year = elapsed_years;
-        for (index, trail) in self.orbit_trails.iter_mut().enumerate() {
-            if trail.len() == ORBIT_TRAIL_POINTS {
-                trail.pop_front();
-            }
-            trail.push_back(dvec3_to_vec3(self.physics.planet_position(index)));
-        }
-
-        true
-    }
-
-    fn poll_orbit_forecasts(&mut self) {
-        let Some(result) = self.forecast_worker.poll() else {
-            return;
-        };
-
-        self.orbit_forecasts = result.orbit_forecasts;
-        self.moon_orbit_offsets = result.moon_orbit_offsets;
-        self.orbit_segments_dirty = true;
-    }
-
-    fn request_orbit_forecasts_if_needed(&mut self, now: Instant) {
-        if now
-            .duration_since(self.last_orbit_forecast_request)
-            .as_secs_f64()
-            < ORBIT_FORECAST_UPDATE_INTERVAL_SECONDS
-        {
-            return;
-        }
-
-        if self.forecast_worker.request(&self.physics) {
-            self.last_orbit_forecast_request = now;
-        }
-    }
-
     fn upload_orbit_segments(&mut self) {
         self.orbit_segments.clear();
-        build_orbit_segments(
-            &self.orbit_trails,
-            &self.orbit_forecasts,
-            &self.moon_orbit_offsets,
+        build_kepler_orbit_segments(
             &self.world,
             &self.physics,
             self.physics.planet_entities(),
@@ -882,7 +795,6 @@ impl State {
                 bytemuck::cast_slice(&self.orbit_segments),
             );
         }
-        self.orbit_segments_dirty = false;
     }
 
     pub fn toggle_borderless_fullscreen(&self) {
@@ -1193,7 +1105,6 @@ impl State {
             }
             self.physics
                 .advance_scaled(frame_seconds, self.simulation_speed);
-            self.update_orbit_trails();
         }
         self.update_camera_follow_target();
 
@@ -1218,10 +1129,6 @@ impl State {
             bytemuck::cast_slice(&[camera_uniform]),
         );
 
-        self.poll_orbit_forecasts();
-        if !self.simulation_paused {
-            self.request_orbit_forecasts_if_needed(now);
-        }
         self.upload_orbit_segments();
 
         for object_gpu in &self.object_gpu {
