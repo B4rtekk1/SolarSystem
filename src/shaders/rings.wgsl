@@ -58,7 +58,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let glow = 1.0 - smoothstep(0.0, 1.0, length(in.local));
+    let thickness = clamp(ring.params.x, 0.05, 1.0);
+    let dist = length(in.local);
+    let glow = 1.0 - smoothstep(thickness * 0.5, thickness, dist);
+
     let alpha = in.color.a * glow;
     return vec4<f32>(in.color.rgb * alpha, alpha);
 }

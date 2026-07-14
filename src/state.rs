@@ -17,8 +17,7 @@ use crate::orbit_render::{
 };
 use crate::pipeline::{
     create_screen_dim_pipeline, create_sphere_overlay_pipeline, create_sphere_pipeline,
-    create_sphere_replace_overlay_pipeline,
-    create_text_overlay_pipeline,
+    create_sphere_replace_overlay_pipeline, create_text_overlay_pipeline,
 };
 use crate::render_utils::{
     DepthTarget, MsaaTarget, alpha_blending_fragment_state, alpha_blending_fragment_targets,
@@ -30,7 +29,7 @@ use crate::stars::Starfield;
 use crate::uniforms::{
     dvec3_to_vec3, entity_object_uniform, ray_sphere_distance, rendered_entity_position,
 };
-use crate::utils::show_selected_body_window;
+use crate::utils::{format_energy_joules, show_selected_body_window};
 use egui_wgpu::{
     Renderer as EguiRenderer, RendererOptions as EguiRendererOptions, ScreenDescriptor,
 };
@@ -59,6 +58,17 @@ const CONTROLS_PANEL_DEFAULT_WIDTH: f32 = 300.0;
 const CONTROLS_PANEL_DEFAULT_HEIGHT: f32 = 360.0;
 const CONTROLS_PANEL_MIN_WIDTH: f32 = 240.0;
 const CONTROLS_PANEL_MIN_HEIGHT: f32 = 120.0;
+
+fn initial_total_energy_by_entity(world: &World, physics: &NBodySimulation) -> Vec<Option<f64>> {
+    let mut energies = vec![None; world.entity_capacity()];
+    for entity in world.entities() {
+        energies[entity.index()] = physics.entity_energy(entity).and_then(|energy| {
+            let total = energy.total_joules();
+            total.is_finite().then_some(total)
+        });
+    }
+    energies
+}
 
 pub struct State {
     pub window: Arc<Window>,
@@ -114,6 +124,7 @@ pub struct State {
     moon_orbits_visible: bool,
     orbit_thickness_scale: f32,
     selected_body: Option<Entity>,
+    initial_total_energy_by_entity: Vec<Option<f64>>,
     window_width_control: u32,
     window_height_control: u32,
 }
@@ -245,6 +256,7 @@ impl State {
 
         let world = create_world();
         let physics = NBodySimulation::from_world(&world, NBodyConfig::default());
+        let initial_total_energy_by_entity = initial_total_energy_by_entity(&world, &physics);
         let orbit_trails = create_orbit_trails(&physics);
 
         let mut object_gpu = Vec::with_capacity(world.entity_capacity());
@@ -511,6 +523,7 @@ impl State {
             moon_orbits_visible: true,
             orbit_thickness_scale: DEFAULT_ORBIT_THICKNESS_SCALE,
             selected_body: None,
+            initial_total_energy_by_entity,
             window_width_control: size.width,
             window_height_control: size.height,
         }
@@ -562,6 +575,15 @@ impl State {
         }
 
         self.selected_body = selected_body;
+        true
+    }
+
+    pub fn clear_selected_body(&mut self) -> bool {
+        if self.selected_body.is_none() {
+            return false;
+        }
+
+        self.selected_body = None;
         true
     }
 
@@ -849,6 +871,24 @@ impl State {
                     );
                     ui.label(format!("{simulation_speed:.2}x"));
                     ui.separator();
+                    ui.collapsing("Planet energy", |ui| {
+                        for planet in self.world.entities_of_kind(CelestialKind::Planet) {
+                            if let Some(energy) = self.physics.entity_energy(planet) {
+                                let delta = self
+                                    .initial_total_energy_by_entity
+                                    .get(planet.index())
+                                    .and_then(|energy| *energy)
+                                    .map(|initial| energy.total_joules() - initial);
+                                ui.label(format!(
+                                    "{}: {}  Δ {}",
+                                    self.world.name(planet),
+                                    format_energy_joules(energy.total_joules()),
+                                    delta.map_or_else(|| "N/A".to_string(), format_energy_joules)
+                                ));
+                            }
+                        }
+                    });
+                    ui.separator();
                     ui.heading("Orbits");
                     ui.checkbox(&mut orbits_visible, "Show orbits");
                     ui.add_enabled_ui(orbits_visible, |ui| {
@@ -886,7 +926,16 @@ impl State {
                     apply_window_size = ui.button("Apply size").clicked();
                 });
 
-            show_selected_body_window(ui.ctx(), &mut self.world, &self.physics, selected_body);
+            let selected_initial_total_energy = selected_body
+                .and_then(|entity| self.initial_total_energy_by_entity.get(entity.index()))
+                .and_then(|energy| *energy);
+            show_selected_body_window(
+                ui.ctx(),
+                &mut self.world,
+                &self.physics,
+                selected_body,
+                selected_initial_total_energy,
+            );
         });
 
         self.simulation_speed = simulation_speed.clamp(MIN_SIMULATION_SPEED, MAX_SIMULATION_SPEED);
@@ -1138,8 +1187,7 @@ impl State {
                 }
             }
 
-            self.planet_rings
-                .render(&mut pass, &self.camera_bind_group);
+            self.planet_rings.render(&mut pass, &self.camera_bind_group);
 
             if self.fps_overlay.text_vertex_count > 0 {
                 pass.set_pipeline(&self.text_overlay_pipeline);

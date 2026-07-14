@@ -47,7 +47,7 @@ impl PlanetRingSystem {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Planet Ring Bind Group Layout"),
                 entries: &[
-                    uniform_buffer_layout_entry(wgpu::ShaderStages::VERTEX),
+                    uniform_buffer_layout_entry(wgpu::ShaderStages::VERTEX_FRAGMENT),
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::VERTEX,
@@ -99,17 +99,14 @@ impl PlanetRingSystem {
             .filter_map(|entity| {
                 let ring = world.ring(entity)?;
                 let planet_radius = world.body(entity).render_radius;
-                let particles = create_ring_particles(
-                    ring,
-                    planet_radius,
-                    entity.index() as u32,
-                );
+                let particles = create_ring_particles(ring, planet_radius, entity.index() as u32);
                 let particle_count = particles.len() as u32;
-                let particle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("{} Ring Particles", world.name(entity))),
-                    contents: bytemuck::cast_slice(&particles),
-                    usage: wgpu::BufferUsages::STORAGE,
-                });
+                let particle_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("{} Ring Particles", world.name(entity))),
+                        contents: bytemuck::cast_slice(&particles),
+                        usage: wgpu::BufferUsages::STORAGE,
+                    });
                 let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(&format!("{} Ring Uniform", world.name(entity))),
                     size: size_of::<RingUniform>() as u64,
@@ -217,11 +214,7 @@ fn ring_uniform(
     uniform
 }
 
-fn create_ring_particles(
-    ring: RingComponent,
-    planet_radius: f32,
-    seed: u32,
-) -> Vec<RingParticle> {
+fn create_ring_particles(ring: RingComponent, planet_radius: f32, seed: u32) -> Vec<RingParticle> {
     let inner = planet_radius * ring.inner_radius_multiplier;
     let outer = planet_radius * ring.outer_radius_multiplier;
     let count = ring.particle_count.max(1).min(12_000);

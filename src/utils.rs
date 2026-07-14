@@ -1,6 +1,6 @@
 use crate::constants::{AU_KM, AU_PER_YEAR_TO_KM_PER_SECOND};
 use crate::ecs::{CelestialKind, Entity, MaterialComponent, World};
-use crate::nbody::NBodySimulation;
+use crate::nbody::{EnergySnapshot, NBodySimulation};
 
 pub fn au_to_km(au: f64) -> f64 {
     au * AU_KM
@@ -36,6 +36,39 @@ fn format_temperature(kelvin: f64) -> String {
     }
 }
 
+pub fn format_energy_joules(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.6e} J")
+    } else {
+        "N/A".to_string()
+    }
+}
+
+fn show_energy_labels(
+    ui: &mut egui::Ui,
+    energy: EnergySnapshot,
+    initial_total_energy: Option<f64>,
+) {
+    ui.label(format!(
+        "Total energy: {}",
+        format_energy_joules(energy.total_joules())
+    ));
+    if let Some(initial_total_energy) = initial_total_energy {
+        ui.label(format!(
+            "Energy change: {}",
+            format_energy_joules(energy.total_joules() - initial_total_energy)
+        ));
+    }
+    ui.label(format!(
+        "Kinetic energy: {}",
+        format_energy_joules(energy.kinetic_joules)
+    ));
+    ui.label(format!(
+        "Potential energy: {}",
+        format_energy_joules(energy.potential_joules)
+    ));
+}
+
 pub fn format_km(km: f64) -> String {
     let absolute_km = km.abs();
     if absolute_km >= 1_000_000.0 {
@@ -52,6 +85,7 @@ pub fn show_selected_body_window(
     world: &mut World,
     physics: &NBodySimulation,
     selected_body: Option<Entity>,
+    initial_total_energy: Option<f64>,
 ) {
     let Some(body_entity) = selected_body else {
         return;
@@ -82,14 +116,12 @@ pub fn show_selected_body_window(
 
     let atmosphere_density = world.atmosphere(body_entity).map(|a| a.density as f64);
 
-    let estimated_temperature =
-        if kind == CelestialKind::Planet || kind == CelestialKind::Moon {
-            let base =
-                estimate_equilibrium_temperature_k(sun_distance, star_brightness);
-            Some(apply_atmosphere_greenhouse(base, atmosphere_density))
-        } else {
-            None
-        };
+    let estimated_temperature = if kind == CelestialKind::Planet || kind == CelestialKind::Moon {
+        let base = estimate_equilibrium_temperature_k(sun_distance, star_brightness);
+        Some(apply_atmosphere_greenhouse(base, atmosphere_density))
+    } else {
+        None
+    };
 
     let window_frame = egui::Frame::window(ctx.global_style().as_ref()).shadow(egui::Shadow::NONE);
 
@@ -161,6 +193,12 @@ pub fn show_selected_body_window(
 
             ui.label(format!("Mass: {:.3e} kg", body.mass));
 
+            if let Some(energy) = physics.entity_energy(body_entity) {
+                ui.separator();
+                ui.label("Energy");
+                show_energy_labels(ui, energy, initial_total_energy);
+            }
+
             ui.label(format!(
                 "Radius: {} ({radius_au:.8} AU)",
                 format_km(body.radius_km as f64)
@@ -214,14 +252,11 @@ pub fn show_selected_body_window(
                 let moon_sun_distance = sun_entity.map_or(physics.position(moon).length(), |sun| {
                     (physics.position(moon) - physics.position(sun)).length()
                 });
-                let moon_atmosphere_density =
-                    world.atmosphere(moon).map(|a| a.density as f64);
+                let moon_atmosphere_density = world.atmosphere(moon).map(|a| a.density as f64);
                 let moon_base_temperature =
                     estimate_equilibrium_temperature_k(moon_sun_distance, star_brightness);
-                let moon_temperature = apply_atmosphere_greenhouse(
-                    moon_base_temperature,
-                    moon_atmosphere_density,
-                );
+                let moon_temperature =
+                    apply_atmosphere_greenhouse(moon_base_temperature, moon_atmosphere_density);
 
                 ui.horizontal(|ui| {
                     let mut moon_name = world.name(moon).to_owned();
@@ -237,6 +272,12 @@ pub fn show_selected_body_window(
                     format_km(au_to_km(moon_distance)),
                     format_temperature(moon_temperature),
                 ));
+                if let Some(moon_energy) = physics.entity_energy(moon) {
+                    ui.label(format!(
+                        "Energy: {}",
+                        format_energy_joules(moon_energy.total_joules())
+                    ));
+                }
                 ui.separator();
             }
 

@@ -20,6 +20,14 @@ pub struct App {
 }
 
 impl App {
+    fn reset_pointer_interaction(&mut self) {
+        self.rotating_world = false;
+        self.panning_map = false;
+        self.left_press_cursor = None;
+        self.left_drag_moved = false;
+        self.last_cursor = None;
+    }
+
     fn shutdown(&mut self) {
         self.closing = true;
         if let Some(state) = self.state.take() {
@@ -67,6 +75,28 @@ impl ApplicationHandler for App {
                 state.resize(size.width, size.height);
             }
 
+            WindowEvent::Focused(false) => {
+                self.reset_pointer_interaction();
+            }
+
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && !event.repeat
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
+            {
+                if state.clear_selected_body() {
+                    state.window.request_redraw();
+                }
+            }
+
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && !event.repeat
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::PrintScreen)) =>
+            {
+                self.reset_pointer_interaction();
+            }
+
             WindowEvent::KeyboardInput { event, .. }
                 if !egui_response.consumed
                     && event.state == ElementState::Pressed
@@ -106,10 +136,7 @@ impl ApplicationHandler for App {
             } => {
                 if egui_response.consumed {
                     if button_state == ElementState::Released {
-                        self.panning_map = false;
-                        self.left_press_cursor = None;
-                        self.left_drag_moved = false;
-                        self.last_cursor = None;
+                        self.reset_pointer_interaction();
                     }
                 } else {
                     match button_state {

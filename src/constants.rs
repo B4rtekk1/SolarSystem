@@ -40,10 +40,10 @@ pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_arra
 pub const TEXT_OVERLAY_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 pub const TEXT_OVERLAY_MAX_VERTICES: usize = 6;
-pub const FPS_TEXT_TEXTURE_WIDTH: u32 = 152;
-pub const FPS_TEXT_TEXTURE_HEIGHT: u32 = 40;
-pub const FPS_FONT_SIZE: f32 = 23.0;
-pub const FPS_LINE_HEIGHT: f32 = 32.0;
+pub const FPS_TEXT_TEXTURE_WIDTH: u32 = 96;
+pub const FPS_TEXT_TEXTURE_HEIGHT: u32 = 28;
+pub const FPS_FONT_SIZE: f32 = 18.0;
+pub const FPS_LINE_HEIGHT: f32 = 24.0;
 pub const FPS_OVERLAY_MARGIN: f32 = 6.0;
 pub const SELECTION_FOCUS_BRIGHTNESS: f32 = 1.14;
 pub const GOOGLE_SANS_BYTES: &[u8] =

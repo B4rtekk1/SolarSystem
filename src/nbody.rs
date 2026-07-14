@@ -39,6 +39,18 @@ struct Body {
     velocity: DVec3,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnergySnapshot {
+    pub kinetic_joules: f64,
+    pub potential_joules: f64,
+}
+
+impl EnergySnapshot {
+    pub fn total_joules(self) -> f64 {
+        self.kinetic_joules + self.potential_joules
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct OrbitForecastTracker {
     normal: DVec3,
@@ -244,6 +256,54 @@ impl NBodySimulation {
 
     pub fn elapsed_years(&self) -> f64 {
         self.elapsed_years
+    }
+
+    pub fn energy(&self) -> EnergySnapshot {
+        let velocity_scale = ASTRONOMICAL_UNIT_METERS / JULIAN_YEAR_SECONDS;
+        let mut kinetic_joules = 0.0;
+        for body in &self.bodies {
+            kinetic_joules += kinetic_energy_joules(body, velocity_scale);
+        }
+
+        let mut potential_joules = 0.0;
+        for i in 0..self.bodies.len() {
+            for j in (i + 1)..self.bodies.len() {
+                potential_joules += pair_potential_energy_joules(
+                    &self.bodies[i],
+                    &self.bodies[j],
+                    self.config.softening_length,
+                );
+            }
+        }
+
+        EnergySnapshot {
+            kinetic_joules,
+            potential_joules,
+        }
+    }
+
+    pub fn entity_energy(&self, entity: Entity) -> Option<EnergySnapshot> {
+        let body_index = self
+            .body_index_by_entity
+            .get(entity.index())
+            .and_then(|body_index| *body_index)?;
+        let body = self.bodies.get(body_index)?;
+        let velocity_scale = ASTRONOMICAL_UNIT_METERS / JULIAN_YEAR_SECONDS;
+        let kinetic_joules = kinetic_energy_joules(body, velocity_scale);
+        let potential_joules = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(other_index, _)| *other_index != body_index)
+            .map(|(_, other)| {
+                0.5 * pair_potential_energy_joules(body, other, self.config.softening_length)
+            })
+            .sum();
+
+        Some(EnergySnapshot {
+            kinetic_joules,
+            potential_joules,
+        })
     }
 
     pub fn forecast_full_planet_orbits(
@@ -584,6 +644,29 @@ fn write_accelerations(bodies: &[Body], softening_length: f64, accelerations: &m
     }
 }
 
+fn kinetic_energy_joules(body: &Body, velocity_scale: f64) -> f64 {
+    let mass_kg = body.mass * SOLAR_MASS_KG;
+    let speed_meters_per_second = body.velocity.length() * velocity_scale;
+    0.5 * mass_kg * speed_meters_per_second * speed_meters_per_second
+}
+
+fn pair_potential_energy_joules(a: &Body, b: &Body, softening_length: f64) -> f64 {
+    let softening_squared = if softening_length.is_finite() && softening_length > 0.0 {
+        softening_length * softening_length
+    } else {
+        0.0
+    };
+    let distance_au = ((b.position - a.position).length_squared() + softening_squared).sqrt();
+    if distance_au <= f64::EPSILON {
+        return 0.0;
+    }
+
+    let mass_a_kg = a.mass * SOLAR_MASS_KG;
+    let mass_b_kg = b.mass * SOLAR_MASS_KG;
+    -GRAVITATIONAL_CONSTANT_M3_KG_S2 * mass_a_kg * mass_b_kg
+        / (distance_au * ASTRONOMICAL_UNIT_METERS)
+}
+
 fn push_body(
     bodies: &mut Vec<Body>,
     body_index_by_entity: &mut [Option<usize>],
@@ -757,6 +840,86 @@ mod tests {
     }
 
     #[test]
+    fn energy_reports_kinetic_and_potential_joules() {
+        let simulation = NBodySimulation {
+            bodies: vec![
+                Body {
+                    mass: 1.0,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::new(1.0, 0.0, 0.0),
+                },
+                Body {
+                    mass: 0.001,
+                    position: DVec3::X,
+                    velocity: DVec3::ZERO,
+                },
+            ],
+            body_index_by_entity: Vec::new(),
+            planet_entities: Vec::new(),
+            moon_orbits: Vec::new(),
+            current_accelerations: vec![DVec3::ZERO; 2],
+            next_accelerations: vec![DVec3::ZERO; 2],
+            config: NBodyConfig {
+                years_per_second: 1.0,
+                fixed_step_years: 0.01,
+                softening_length: 0.0,
+            },
+            accumulator_years: 0.0,
+            elapsed_years: 0.0,
+        };
+
+        let energy = simulation.energy();
+        let speed_meters_per_second = ASTRONOMICAL_UNIT_METERS / JULIAN_YEAR_SECONDS;
+        let expected_kinetic = 0.5 * SOLAR_MASS_KG * speed_meters_per_second.powi(2);
+        let expected_potential =
+            -GRAVITATIONAL_CONSTANT_M3_KG_S2 * SOLAR_MASS_KG * (0.001 * SOLAR_MASS_KG)
+                / ASTRONOMICAL_UNIT_METERS;
+
+        assert!((energy.kinetic_joules / expected_kinetic - 1.0).abs() < 1.0e-12);
+        assert!((energy.potential_joules / expected_potential - 1.0).abs() < 1.0e-12);
+        assert!((energy.total_joules() - (expected_kinetic + expected_potential)).abs() < 1.0e30);
+    }
+
+    #[test]
+    fn entity_energy_assigns_half_of_pair_potential() {
+        let entity = Entity::from_index(0);
+        let simulation = NBodySimulation {
+            bodies: vec![
+                Body {
+                    mass: 1.0,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                },
+                Body {
+                    mass: 0.001,
+                    position: DVec3::X,
+                    velocity: DVec3::ZERO,
+                },
+            ],
+            body_index_by_entity: vec![Some(0), Some(1)],
+            planet_entities: Vec::new(),
+            moon_orbits: Vec::new(),
+            current_accelerations: vec![DVec3::ZERO; 2],
+            next_accelerations: vec![DVec3::ZERO; 2],
+            config: NBodyConfig {
+                years_per_second: 1.0,
+                fixed_step_years: 0.01,
+                softening_length: 0.0,
+            },
+            accumulator_years: 0.0,
+            elapsed_years: 0.0,
+        };
+
+        let total = simulation.energy();
+        let entity_energy = simulation.entity_energy(entity).unwrap();
+
+        assert_eq!(entity_energy.kinetic_joules, 0.0);
+        assert!(
+            (entity_energy.potential_joules / (0.5 * total.potential_joules) - 1.0).abs() < 1.0e-12
+        );
+    }
+
+    #[test]
     fn elliptical_initial_state_places_central_mass_at_focus() {
         let orbit = Orbit::elliptical(2.0, 3.0_f32.sqrt(), 1.0);
 
@@ -819,6 +982,43 @@ mod tests {
             ],
             body_index_by_entity: vec![Some(0), Some(1)],
             planet_entities: vec![planet],
+            moon_orbits: Vec::new(),
+            current_accelerations: vec![DVec3::ZERO; 2],
+            next_accelerations: vec![DVec3::ZERO; 2],
+            config: NBodyConfig {
+                years_per_second: 1.0,
+                fixed_step_years: 1.0 / 2048.0,
+                softening_length: 0.0,
+            },
+            accumulator_years: 0.0,
+            elapsed_years: 0.0,
+        };
+
+        let forecast = simulation.forecast_full_planet_orbits(256, 1.0 / 64.0);
+
+        assert_eq!(forecast.len(), 1);
+        assert!(forecast[0].len() > 50);
+        assert!(forecast[0].len() < 80);
+    }
+
+    #[test]
+    fn forecast_stops_after_full_retrograde_orbit() {
+        let moon = Entity::from_index(1);
+        let simulation = NBodySimulation {
+            bodies: vec![
+                Body {
+                    mass: 1.0,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                },
+                Body {
+                    mass: 0.0,
+                    position: DVec3::X,
+                    velocity: -DVec3::Y * TAU,
+                },
+            ],
+            body_index_by_entity: vec![Some(0), Some(1)],
+            planet_entities: vec![moon],
             moon_orbits: Vec::new(),
             current_accelerations: vec![DVec3::ZERO; 2],
             next_accelerations: vec![DVec3::ZERO; 2],
