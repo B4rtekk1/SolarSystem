@@ -20,26 +20,26 @@ pub fn configure_egui(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 
     let mut style = (*ctx.global_style()).clone();
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.window_margin = egui::Margin::symmetric(16, 14);
-    style.spacing.button_padding = egui::vec2(12.0, 7.0);
-    style.spacing.interact_size.y = 30.0;
-    style.spacing.slider_width = 168.0;
+    style.spacing.item_spacing = egui::vec2(6.0, 6.0);
+    style.spacing.window_margin = egui::Margin::symmetric(12, 10);
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.interact_size.y = 26.0;
+    style.spacing.slider_width = 136.0;
     style.text_styles.insert(
         egui::TextStyle::Heading,
         egui::FontId::new(20.0, egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Body,
-        egui::FontId::new(14.5, egui::FontFamily::Proportional),
+        egui::FontId::new(13.5, egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Button,
-        egui::FontId::new(14.5, egui::FontFamily::Proportional),
+        egui::FontId::new(13.5, egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Small,
-        egui::FontId::new(12.0, egui::FontFamily::Proportional),
+        egui::FontId::new(11.0, egui::FontFamily::Proportional),
     );
 
     let mut visuals = egui::Visuals::dark();
@@ -98,7 +98,7 @@ pub fn configure_egui(ctx: &egui::Context) {
 }
 
 pub fn ui_section_heading(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(4.0);
+    ui.add_space(3.0);
     ui.label(
         egui::RichText::new(title.to_uppercase())
             .size(11.0)
@@ -135,7 +135,7 @@ pub fn show_body_browser(
     let mut shown = 0;
 
     egui::ScrollArea::vertical()
-        .max_height(176.0)
+        .max_height(128.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
             for entity in world.entities() {
@@ -156,7 +156,7 @@ pub fn show_body_browser(
                         egui::Label::new(label).truncate(),
                     );
                     if ui
-                        .add_sized([88.0, 24.0], egui::Button::new("Przejdź do"))
+                        .add_sized([88.0, 24.0], egui::Button::new("Go to"))
                         .clicked()
                     {
                         go_to = Some(entity);
@@ -166,7 +166,7 @@ pub fn show_body_browser(
         });
 
     if shown == 0 {
-        ui.label(egui::RichText::new("Brak wyników").small().color(UI_MUTED));
+        ui.label(egui::RichText::new("No results").small().color(UI_MUTED));
     }
 
     go_to

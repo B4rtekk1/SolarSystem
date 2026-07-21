@@ -130,3 +130,14 @@ cargo build --release
 ```
 
 The test suite covers N-body physics, scene construction, orbit geometry, GPU data, and `.orbs` file persistence and validation.
+
+## 📦 Publishing a release
+
+Create and push a version tag to start the automated Windows release workflow:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions will build the project in release mode, create a GitHub Release with automatically generated notes, and attach a ready-to-run `SolarSystem-<tag>-windows-x86_64.exe` file.

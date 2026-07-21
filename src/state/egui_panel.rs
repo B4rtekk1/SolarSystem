@@ -110,13 +110,13 @@ impl State {
                         reset_camera_requested = columns[0]
                             .add_sized(
                                 [columns[0].available_width(), 30.0],
-                                egui::Button::new("Reset kamery"),
+                                egui::Button::new("Reset camera"),
                             )
                             .clicked();
                         selected_view_requested = columns[1]
                             .add_enabled(
                                 selected_body.is_some(),
-                                egui::Button::new("Wybrana planeta"),
+                                egui::Button::new("Selected"),
                             )
                             .clicked();
                     });
@@ -124,13 +124,13 @@ impl State {
                         top_view_requested = columns[0]
                             .add_sized(
                                 [columns[0].available_width(), 30.0],
-                                egui::Button::new("Z góry"),
+                                egui::Button::new("Top"),
                             )
                             .clicked();
                         ecliptic_view_requested = columns[1]
                             .add_sized(
                                 [columns[1].available_width(), 30.0],
-                                egui::Button::new("Ekliptyka"),
+                                egui::Button::new("Ecliptic"),
                             )
                             .clicked();
                     });
@@ -143,7 +143,7 @@ impl State {
                     ui_section_heading(ui, "Objects");
                     ui.add(
                         egui::TextEdit::singleline(&mut body_search)
-                            .hint_text("Szukaj obiektu")
+                            .hint_text("Search object")
                             .desired_width(ui.available_width()),
                     );
                     go_to_body = show_body_browser(ui, &self.world, &body_search, selected_body);
@@ -238,8 +238,8 @@ impl State {
                             .small()
                             .color(UI_MUTED),
                     );
-                    show_metrics_chart(ui, "Energia", "J", &energy_values);
-                    show_metrics_chart(ui, "Odległość", "AU", &distance_values);
+                    show_metrics_chart(ui, "Energy", "J", &energy_values);
+                    show_metrics_chart(ui, "Distance", "AU", &distance_values);
 
                     ui.add_space(6.0);
                     ui.separator();

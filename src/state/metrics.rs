@@ -26,7 +26,7 @@ pub fn initial_total_energy_by_entity(
 
 pub fn show_metrics_chart(ui: &mut egui::Ui, title: &str, unit: &str, values: &[f64]) {
     ui.label(egui::RichText::new(title).small().color(UI_MUTED));
-    let desired_size = egui::vec2(ui.available_width(), 72.0);
+    let desired_size = egui::vec2(ui.available_width(), 52.0);
     let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(6, 14, 28));
@@ -46,7 +46,7 @@ pub fn show_metrics_chart(ui: &mut egui::Ui, title: &str, unit: &str, values: &[
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Zbieranie danych",
+            "Collecting data",
             egui::FontId::new(12.0, egui::FontFamily::Proportional),
             UI_MUTED,
         );
