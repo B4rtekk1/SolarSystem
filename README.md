@@ -14,6 +14,13 @@ Explore planets and moons, observe their orbital motion, and analyze simulation 
 
 ---
 
+## 🎬 DEMO
+
+
+https://github.com/user-attachments/assets/b9040f11-5147-4250-a88f-fecba0a780d7
+
+
+
 ## ✨ Features
 
 - **N-body simulation** with gravity, a fixed time step, and energy monitoring.
