@@ -276,4 +276,151 @@ impl World {
     pub fn set_name(&mut self, entity: Entity, name: String) {
         self.names[entity.index()].value = name;
     }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let entity_count = self.kinds.len();
+        if self.names.len() != entity_count
+            || self.parents.len() != entity_count
+            || self.bodies.len() != entity_count
+            || self.rotations.len() != entity_count
+            || self.renders.len() != entity_count
+            || self.atmospheres.len() != entity_count
+            || self.rings.len() != entity_count
+        {
+            return Err("ECS component arrays have different lengths".to_string());
+        }
+
+        for entity in self.entities() {
+            if self.name(entity).trim().is_empty() {
+                return Err(format!("Entity {} has an empty name", entity.index()));
+            }
+            if let Some(parent) = self.parent(entity) {
+                if parent.entity.index() >= entity_count {
+                    return Err(format!(
+                        "Entity {} references missing parent {}",
+                        entity.index(),
+                        parent.entity.index()
+                    ));
+                }
+                if parent.entity == entity {
+                    return Err(format!(
+                        "Entity {} cannot be its own parent",
+                        entity.index()
+                    ));
+                }
+            }
+
+            validate_body(self.body(entity), entity)?;
+            validate_rotation(self.rotation(entity), entity)?;
+            validate_render(self.render(entity), entity)?;
+            if let Some(atmosphere) = self.atmosphere(entity) {
+                validate_atmosphere(atmosphere, entity)?;
+            }
+            if let Some(ring) = self.ring(entity) {
+                validate_ring(ring, entity)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_body(body: BodyComponent, entity: Entity) -> Result<(), String> {
+    if !body.mass.is_finite() || body.mass < 0.0 {
+        return Err(format!("Entity {} has invalid mass", entity.index()));
+    }
+    if !body.radius_km.is_finite() || body.radius_km < 0.0 {
+        return Err(format!("Entity {} has invalid radius", entity.index()));
+    }
+    if !body.render_radius.is_finite() || body.render_radius < 0.0 {
+        return Err(format!(
+            "Entity {} has invalid render radius",
+            entity.index()
+        ));
+    }
+    if let Some(orbit) = body.orbit {
+        if !orbit.center.iter().all(|value| value.is_finite())
+            || !orbit.semi_major_axis.is_finite()
+            || !orbit.semi_minor_axis.is_finite()
+            || !orbit.angular_speed.is_finite()
+            || !orbit.phase.is_finite()
+            || !orbit.ascending_node.is_finite()
+            || !orbit.argument_of_periapsis.is_finite()
+            || !orbit.inclination.is_finite()
+        {
+            return Err(format!(
+                "Entity {} has invalid orbit values",
+                entity.index()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_rotation(rotation: RotationComponent, entity: Entity) -> Result<(), String> {
+    if !rotation.speed.is_finite() {
+        return Err(format!(
+            "Entity {} has invalid rotation speed",
+            entity.index()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_render(render: RenderComponent, entity: Entity) -> Result<(), String> {
+    match render.material {
+        MaterialComponent::Star(material) => {
+            validate_color(material.base_color, entity)?;
+            validate_color(material.accent_color, entity)?;
+            if !material.brightness.is_finite() || !material.surface_temperature.is_finite() {
+                return Err(format!(
+                    "Entity {} has invalid star material",
+                    entity.index()
+                ));
+            }
+        }
+        MaterialComponent::Surface(material) => {
+            validate_color(material.base_color, entity)?;
+            validate_color(material.accent_color, entity)?;
+            if !material.roughness.is_finite() || !material.metallic.is_finite() {
+                return Err(format!(
+                    "Entity {} has invalid surface material",
+                    entity.index()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_atmosphere(atmosphere: AtmosphereComponent, entity: Entity) -> Result<(), String> {
+    validate_color(atmosphere.color, entity)?;
+    if !atmosphere.density.is_finite() || !atmosphere.radius_multiplier.is_finite() {
+        return Err(format!("Entity {} has invalid atmosphere", entity.index()));
+    }
+    Ok(())
+}
+
+fn validate_ring(ring: RingComponent, entity: Entity) -> Result<(), String> {
+    validate_color(ring.color, entity)?;
+    if !ring.inner_radius_multiplier.is_finite()
+        || !ring.outer_radius_multiplier.is_finite()
+        || !ring.tilt.is_finite()
+        || !ring.rotation_speed.is_finite()
+    {
+        return Err(format!("Entity {} has invalid ring values", entity.index()));
+    }
+    if ring.inner_radius_multiplier < 0.0
+        || ring.outer_radius_multiplier < ring.inner_radius_multiplier
+    {
+        return Err(format!("Entity {} has invalid ring radii", entity.index()));
+    }
+    Ok(())
+}
+
+fn validate_color(color: Color, entity: Entity) -> Result<(), String> {
+    if !color.r.is_finite() || !color.g.is_finite() || !color.b.is_finite() {
+        return Err(format!("Entity {} has invalid color", entity.index()));
+    }
+    Ok(())
 }

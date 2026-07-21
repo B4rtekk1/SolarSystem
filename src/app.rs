@@ -50,9 +50,16 @@ impl ApplicationHandler for App {
                 .unwrap(),
         );
 
-        self.state = Some(pollster::block_on(State::new(window)));
-        if let Some(state) = &self.state {
-            state.window.request_redraw();
+        match pollster::block_on(State::new(window)) {
+            Ok(state) => {
+                state.window.request_redraw();
+                self.state = Some(state);
+            }
+            Err(error) => {
+                eprintln!("Solar System cannot start: {error}");
+                self.closing = true;
+                event_loop.exit();
+            }
         }
     }
 
@@ -79,6 +86,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(size) => {
                 state.resize(size.width, size.height);
+                state.window.request_redraw();
             }
 
             WindowEvent::Focused(false) => {
@@ -219,7 +227,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested if !self.closing => {
                 state.render();
-                if !self.closing {
+                if !self.closing && state.should_auto_redraw() {
                     state.window.request_redraw();
                 }
             }

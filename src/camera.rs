@@ -4,7 +4,7 @@ use crate::constants::{
 };
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
-use std::f32::consts::TAU;
+use std::f32::consts::{FRAC_PI_2, TAU};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Camera {
@@ -30,8 +30,45 @@ impl Camera {
         self.distance
     }
 
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.yaw.is_finite()
+            || !self.pitch.is_finite()
+            || !self.distance.is_finite()
+            || !self.target.is_finite()
+        {
+            return Err("Camera contains invalid values".to_string());
+        }
+        if self.distance <= 0.0 {
+            return Err("Camera distance must be positive".to_string());
+        }
+        Ok(())
+    }
+
     pub fn set_target(&mut self, target: Vec3) {
         self.target = target;
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn set_top_view(&mut self) {
+        self.yaw = 0.0;
+        self.pitch = FRAC_PI_2 - 0.001;
+        self.target = Vec3::ZERO;
+        self.distance = DEFAULT_CAMERA_DISTANCE;
+    }
+
+    pub fn set_ecliptic_view(&mut self) {
+        self.yaw = 0.0;
+        self.pitch = 0.001;
+        self.target = Vec3::ZERO;
+        self.distance = DEFAULT_CAMERA_DISTANCE;
+    }
+
+    pub fn focus_on(&mut self, target: Vec3, distance: f32) {
+        self.target = target;
+        self.distance = distance.clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
     }
 
     pub fn orbit(&mut self, delta_x: f64, delta_y: f64) {

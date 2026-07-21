@@ -34,6 +34,7 @@ use egui_wgpu::{
 };
 use egui_winit::State as EguiWinitState;
 use rfd::FileDialog;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -51,6 +52,12 @@ struct IndirectBatch {
     instance_count: u32,
 }
 
+#[derive(Clone, Copy)]
+struct MetricsSample {
+    energy_joules: f64,
+    distance_au: f64,
+}
+
 const MIN_WINDOW_CONTROL_WIDTH: u32 = 320;
 const MIN_WINDOW_CONTROL_HEIGHT: u32 = 240;
 const MAX_WINDOW_CONTROL_WIDTH: u32 = 7680;
@@ -60,6 +67,7 @@ const CONTROLS_PANEL_DEFAULT_HEIGHT: f32 = 520.0;
 const CONTROLS_PANEL_MIN_WIDTH: f32 = 280.0;
 const CONTROLS_PANEL_MIN_HEIGHT: f32 = 120.0;
 const DEFAULT_SAVE_PATH: &str = "solar_system.orbs";
+const HISTORY_SAMPLE_LIMIT: usize = 360;
 const STAR_PICK_RADIUS_SCALE: f32 = 1.08;
 const BODY_PICK_RADIUS_SCALE: f32 = 1.45;
 const MIN_BODY_PICK_RADIUS: f32 = 0.08;
@@ -256,6 +264,129 @@ fn pick_radius(kind: CelestialKind, render_radius: f32) -> f32 {
     }
 }
 
+fn kind_label(kind: CelestialKind) -> &'static str {
+    match kind {
+        CelestialKind::Star => "star",
+        CelestialKind::Planet => "planet",
+        CelestialKind::Moon => "moon",
+    }
+}
+
+fn world_name_for_label(world: &World, entity: Entity) -> String {
+    format!(
+        "{} ({})",
+        world.name(entity),
+        kind_label(world.kind(entity))
+    )
+}
+
+fn show_body_browser(
+    ui: &mut egui::Ui,
+    world: &World,
+    search: &str,
+    selected_body: Option<Entity>,
+) -> Option<Entity> {
+    let needle = search.trim().to_lowercase();
+    let mut go_to = None;
+    let mut shown = 0;
+
+    egui::ScrollArea::vertical()
+        .max_height(176.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for entity in world.entities() {
+                let name = world.name(entity);
+                if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
+                    continue;
+                }
+                shown += 1;
+                let selected = selected_body == Some(entity);
+                ui.horizontal(|ui| {
+                    let label = if selected {
+                        format!("{} ({})", name, kind_label(world.kind(entity)))
+                    } else {
+                        name.to_string()
+                    };
+                    ui.add_sized(
+                        [ui.available_width().max(96.0) - 96.0, 24.0],
+                        egui::Label::new(label).truncate(),
+                    );
+                    if ui
+                        .add_sized([88.0, 24.0], egui::Button::new("Przejdź do"))
+                        .clicked()
+                    {
+                        go_to = Some(entity);
+                    }
+                });
+            }
+        });
+
+    if shown == 0 {
+        ui.label(egui::RichText::new("Brak wyników").small().color(UI_MUTED));
+    }
+
+    go_to
+}
+
+fn show_metrics_chart(ui: &mut egui::Ui, title: &str, unit: &str, values: &[f64]) {
+    ui.label(egui::RichText::new(title).small().color(UI_MUTED));
+    let desired_size = egui::vec2(ui.available_width(), 72.0);
+    let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(6, 14, 28));
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(31, 62, 88)),
+        egui::StrokeKind::Inside,
+    );
+
+    let values: Vec<f64> = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect();
+    if values.len() < 2 {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Zbieranie danych",
+            egui::FontId::new(12.0, egui::FontFamily::Proportional),
+            UI_MUTED,
+        );
+        return;
+    }
+
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let span = (max - min).abs().max(f64::EPSILON);
+    let to_point = |index: usize, value: f64| {
+        let x = rect.left() + index as f32 / (values.len() - 1) as f32 * rect.width();
+        let y = rect.bottom() - ((value - min) / span) as f32 * rect.height();
+        egui::pos2(x, y)
+    };
+
+    for index in 1..values.len() {
+        painter.line_segment(
+            [
+                to_point(index - 1, values[index - 1]),
+                to_point(index, values[index]),
+            ],
+            egui::Stroke::new(1.6, UI_ACCENT),
+        );
+    }
+
+    if let Some(last) = values.last() {
+        painter.text(
+            rect.right_top() + egui::vec2(-6.0, 6.0),
+            egui::Align2::RIGHT_TOP,
+            format!("{last:.3e} {unit}"),
+            egui::FontId::new(11.0, egui::FontFamily::Proportional),
+            UI_TEXT,
+        );
+    }
+}
+
 pub struct State {
     pub window: Arc<Window>,
     surface: Surface<'static>,
@@ -313,14 +444,18 @@ pub struct State {
     window_width_control: u32,
     window_height_control: u32,
     save_status: Option<String>,
+    body_search: String,
+    metrics_history: VecDeque<MetricsSample>,
 }
 
 impl State {
-    pub async fn new(window: Arc<Window>) -> Self {
+    pub async fn new(window: Arc<Window>) -> Result<Self, String> {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window.clone()).unwrap();
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|error| format!("Failed to create GPU surface: {error}"))?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -328,31 +463,35 @@ impl State {
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .map_err(|error| format!("No compatible GPU adapter found: {error}"))?;
 
         let adapter_features = adapter.features();
         let required_features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
-        assert!(
-            adapter_features.contains(required_features),
-            "GPU adapter does not support INDIRECT_FIRST_INSTANCE"
-        );
+        if !adapter_features.contains(required_features) {
+            return Err("GPU adapter does not support INDIRECT_FIRST_INSTANCE".to_string());
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features,
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .map_err(|error| format!("Failed to create GPU device: {error}"))?;
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats[0];
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+            wgpu::PresentMode::Fifo
+        } else {
+            caps.present_modes[0]
+        };
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Immediate,
+            present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -675,7 +814,7 @@ impl State {
         let egui_renderer = EguiRenderer::new(&device, format, EguiRendererOptions::default());
         let now = Instant::now();
 
-        Self {
+        Ok(Self {
             window,
             surface,
             device,
@@ -732,7 +871,9 @@ impl State {
             window_width_control: size.width,
             window_height_control: size.height,
             save_status: None,
-        }
+            body_search: String::new(),
+            metrics_history: VecDeque::new(),
+        })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -769,31 +910,10 @@ impl State {
                 true
             }
             Err(error) => {
-                self.reset_to_builtin_solar_system();
-                self.save_status = Some(format!(
-                    "Ignored incompatible {DEFAULT_SAVE_PATH}; restored built-in Solar System ({error})"
-                ));
-                true
+                self.save_status = Some(format!("Load failed; current session kept: {error}"));
+                false
             }
         }
-    }
-
-    fn reset_to_builtin_solar_system(&mut self) {
-        let world = create_world();
-        let physics = NBodySimulation::from_world(&world, NBodyConfig::default());
-        self.initial_total_energy_by_entity = initial_total_energy_by_entity(&world, &physics);
-        self.world = world;
-        self.physics = physics;
-        self.selected_body = None;
-        self.camera_follow_enabled = false;
-        self.simulation_speed = DEFAULT_SIMULATION_SPEED;
-        self.simulation_paused = false;
-        self.orbits_visible = true;
-        self.planet_orbits_visible = true;
-        self.moon_orbits_visible = true;
-        self.orbit_thickness_scale = DEFAULT_ORBIT_THICKNESS_SCALE;
-        self.rotation_time = 0.0;
-        self.last_physics_update = Instant::now();
     }
 
     pub fn save_as_dialog(&mut self) -> bool {
@@ -902,6 +1022,7 @@ impl State {
         self.window_height_control = data
             .window_height
             .clamp(MIN_WINDOW_CONTROL_HEIGHT, MAX_WINDOW_CONTROL_HEIGHT);
+        self.metrics_history.clear();
 
         self.last_physics_update = Instant::now();
         Ok(())
@@ -939,6 +1060,7 @@ impl State {
         }
 
         self.selected_body = selected_body;
+        self.metrics_history.clear();
         self.update_camera_follow_target();
         true
     }
@@ -950,6 +1072,7 @@ impl State {
 
         self.selected_body = None;
         self.camera_follow_enabled = false;
+        self.metrics_history.clear();
         true
     }
 
@@ -961,6 +1084,80 @@ impl State {
         self.camera_follow_enabled = !self.camera_follow_enabled;
         self.update_camera_follow_target();
         true
+    }
+
+    fn reset_camera(&mut self) {
+        self.camera.reset();
+        self.camera_follow_enabled = false;
+    }
+
+    fn set_top_view(&mut self) {
+        self.camera.set_top_view();
+        self.camera_follow_enabled = false;
+    }
+
+    fn set_ecliptic_view(&mut self) {
+        self.camera.set_ecliptic_view();
+        self.camera_follow_enabled = false;
+    }
+
+    fn go_to_body(&mut self, entity: Entity) {
+        if self.selected_body != Some(entity) {
+            self.metrics_history.clear();
+        }
+        self.selected_body = Some(entity);
+        self.focus_camera_on(entity);
+    }
+
+    fn focus_selected_planet(&mut self) {
+        if let Some(entity) = self.selected_body {
+            let target = if self.world.kind(entity) == CelestialKind::Moon {
+                self.world
+                    .parent(entity)
+                    .map_or(entity, |parent| parent.entity)
+            } else {
+                entity
+            };
+            self.focus_camera_on(target);
+        }
+    }
+
+    fn focus_camera_on(&mut self, entity: Entity) {
+        let position = rendered_entity_position(&self.world, &self.physics, entity);
+        let distance = (self.world.body(entity).render_radius * 18.0).clamp(1.8, 14.0);
+        self.camera.focus_on(position, distance);
+        self.camera_follow_enabled = true;
+    }
+
+    fn record_metrics_sample(&mut self) {
+        let energy_joules = self
+            .selected_body
+            .and_then(|entity| self.physics.entity_energy(entity))
+            .unwrap_or_else(|| self.physics.energy())
+            .total_joules();
+        let distance_au = self.selected_body.map_or(0.0, |entity| {
+            let reference = if self.world.kind(entity) == CelestialKind::Moon {
+                self.world
+                    .parent(entity)
+                    .map(|parent| parent.entity)
+                    .or_else(|| self.world.first_entity_of_kind(CelestialKind::Star))
+            } else {
+                self.world.first_entity_of_kind(CelestialKind::Star)
+            };
+            reference.map_or(0.0, |reference| {
+                (self.physics.position(entity) - self.physics.position(reference)).length()
+            })
+        });
+
+        if energy_joules.is_finite() && distance_au.is_finite() {
+            self.metrics_history.push_back(MetricsSample {
+                energy_joules,
+                distance_au,
+            });
+            while self.metrics_history.len() > HISTORY_SAMPLE_LIMIT {
+                self.metrics_history.pop_front();
+            }
+        }
     }
 
     fn update_camera_follow_target(&mut self) {
@@ -1182,11 +1379,17 @@ impl State {
         let mut camera_follow_enabled = self.camera_follow_enabled;
         let mut window_width_control = self.window_width_control;
         let mut window_height_control = self.window_height_control;
+        let mut body_search = self.body_search.clone();
         let mut apply_window_size = false;
         let mut save_requested = false;
         let mut load_requested = false;
         let mut save_as_requested = false;
         let mut load_file_requested = false;
+        let mut reset_camera_requested = false;
+        let mut top_view_requested = false;
+        let mut ecliptic_view_requested = false;
+        let mut selected_view_requested = false;
+        let mut go_to_body = None;
         let selected_body = self.selected_body;
 
         let full_output = egui_ctx.run_ui(raw_input, |ui| {
@@ -1263,11 +1466,47 @@ impl State {
                     ui.add_enabled_ui(selected_body.is_some(), |ui| {
                         ui.checkbox(&mut camera_follow_enabled, "Follow selected body");
                     });
+                    ui.columns(2, |columns| {
+                        reset_camera_requested = columns[0]
+                            .add_sized(
+                                [columns[0].available_width(), 30.0],
+                                egui::Button::new("Reset kamery"),
+                            )
+                            .clicked();
+                        selected_view_requested = columns[1]
+                            .add_enabled(
+                                selected_body.is_some(),
+                                egui::Button::new("Wybrana planeta"),
+                            )
+                            .clicked();
+                    });
+                    ui.columns(2, |columns| {
+                        top_view_requested = columns[0]
+                            .add_sized(
+                                [columns[0].available_width(), 30.0],
+                                egui::Button::new("Z góry"),
+                            )
+                            .clicked();
+                        ecliptic_view_requested = columns[1]
+                            .add_sized(
+                                [columns[1].available_width(), 30.0],
+                                egui::Button::new("Ekliptyka"),
+                            )
+                            .clicked();
+                    });
                     ui.label(
                         egui::RichText::new("Drag to pan · right-drag to orbit · scroll to zoom")
                             .small()
                             .color(UI_MUTED),
                     );
+
+                    ui_section_heading(ui, "Objects");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut body_search)
+                            .hint_text("Szukaj obiektu")
+                            .desired_width(ui.available_width()),
+                    );
+                    go_to_body = show_body_browser(ui, &self.world, &body_search, selected_body);
 
                     ui_section_heading(ui, "Orbit paths");
                     ui.checkbox(&mut orbits_visible, "Show orbits");
@@ -1340,6 +1579,28 @@ impl State {
                         ui.label(egui::RichText::new(status).small().color(UI_MUTED));
                     }
 
+                    ui_section_heading(ui, "Charts");
+                    let energy_values = self
+                        .metrics_history
+                        .iter()
+                        .map(|sample| sample.energy_joules)
+                        .collect::<Vec<_>>();
+                    let distance_values = self
+                        .metrics_history
+                        .iter()
+                        .map(|sample| sample.distance_au)
+                        .collect::<Vec<_>>();
+                    let chart_target = selected_body
+                        .map(|entity| world_name_for_label(&self.world, entity))
+                        .unwrap_or_else(|| "system".to_string());
+                    ui.label(
+                        egui::RichText::new(format!("Target: {chart_target}"))
+                            .small()
+                            .color(UI_MUTED),
+                    );
+                    show_metrics_chart(ui, "Energia", "J", &energy_values);
+                    show_metrics_chart(ui, "Odległość", "AU", &distance_values);
+
                     ui.add_space(6.0);
                     ui.separator();
                     ui.label(
@@ -1374,6 +1635,22 @@ impl State {
         self.update_camera_follow_target();
         self.window_width_control = window_width_control;
         self.window_height_control = window_height_control;
+        self.body_search = body_search;
+        if reset_camera_requested {
+            self.reset_camera();
+        }
+        if top_view_requested {
+            self.set_top_view();
+        }
+        if ecliptic_view_requested {
+            self.set_ecliptic_view();
+        }
+        if selected_view_requested {
+            self.focus_selected_planet();
+        }
+        if let Some(entity) = go_to_body {
+            self.go_to_body(entity);
+        }
         if apply_window_size {
             self.request_window_size(window_width_control, window_height_control);
         }
@@ -1421,6 +1698,7 @@ impl State {
             }
             self.physics
                 .advance_scaled(frame_seconds, self.simulation_speed);
+            self.record_metrics_sample();
         }
         self.update_camera_follow_target();
 
@@ -1666,6 +1944,10 @@ impl State {
 
     pub fn wait_idle(&self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    pub fn should_auto_redraw(&self) -> bool {
+        !self.simulation_paused
     }
 }
 

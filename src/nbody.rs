@@ -223,6 +223,105 @@ impl NBodySimulation {
         &self.planet_entities
     }
 
+    pub fn validate_for_world(&self, world: &World) -> Result<(), String> {
+        let entity_count = world.entity_capacity();
+        if self.body_index_by_entity.len() != entity_count {
+            return Err("Physics entity index length does not match world".to_string());
+        }
+        if self.current_accelerations.len() != self.bodies.len()
+            || self.next_accelerations.len() != self.bodies.len()
+        {
+            return Err("Physics acceleration buffers do not match bodies".to_string());
+        }
+        if !self.config.years_per_second.is_finite()
+            || !self.config.fixed_step_years.is_finite()
+            || !self.config.softening_length.is_finite()
+            || self.config.years_per_second <= 0.0
+            || self.config.fixed_step_years <= 0.0
+            || self.config.softening_length < 0.0
+            || !self.accumulator_years.is_finite()
+            || !self.elapsed_years.is_finite()
+        {
+            return Err("Physics configuration contains invalid values".to_string());
+        }
+
+        let mut seen_body_indices = vec![false; self.bodies.len()];
+        for entity in world.entities() {
+            let Some(body_index) = self.body_index_by_entity[entity.index()] else {
+                return Err(format!("Entity {} is missing from physics", entity.index()));
+            };
+            if body_index >= self.bodies.len() {
+                return Err(format!(
+                    "Entity {} references missing physics body {}",
+                    entity.index(),
+                    body_index
+                ));
+            }
+            if seen_body_indices[body_index] {
+                return Err(format!(
+                    "Physics body {} is assigned to more than one entity",
+                    body_index
+                ));
+            }
+            seen_body_indices[body_index] = true;
+        }
+        if seen_body_indices.iter().any(|seen| !seen) {
+            return Err("Physics contains bodies without matching entities".to_string());
+        }
+
+        for (index, body) in self.bodies.iter().enumerate() {
+            if !body.mass.is_finite()
+                || body.mass < 0.0
+                || !body.position.is_finite()
+                || !body.velocity.is_finite()
+            {
+                return Err(format!("Physics body {index} contains invalid values"));
+            }
+        }
+        for acceleration in self
+            .current_accelerations
+            .iter()
+            .chain(self.next_accelerations.iter())
+        {
+            if !acceleration.is_finite() {
+                return Err("Physics acceleration buffer contains invalid values".to_string());
+            }
+        }
+
+        for entity in &self.planet_entities {
+            if entity.index() >= entity_count {
+                return Err(format!(
+                    "Physics references missing planet entity {}",
+                    entity.index()
+                ));
+            }
+            if world.kind(*entity) != CelestialKind::Planet {
+                return Err(format!(
+                    "Physics planet list contains non-planet entity {}",
+                    entity.index()
+                ));
+            }
+        }
+        for target in &self.moon_orbits {
+            if target.entity.index() >= entity_count || target.parent.index() >= entity_count {
+                return Err("Physics moon orbit references missing entity".to_string());
+            }
+            if world.kind(target.entity) != CelestialKind::Moon
+                || world.kind(target.parent) != CelestialKind::Planet
+                || world
+                    .parent(target.entity)
+                    .is_none_or(|parent| parent.entity != target.parent)
+            {
+                return Err(format!(
+                    "Physics moon orbit target {} does not match world parentage",
+                    target.entity.index()
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn position(&self, entity: Entity) -> DVec3 {
         self.body_index_by_entity
             .get(entity.index())

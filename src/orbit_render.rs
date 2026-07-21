@@ -150,9 +150,6 @@ pub fn build_orbit_segments(
     }
 }
 
-/// Draws complete osculating Kepler ellipses from the scene's orbital elements.
-/// Unlike N-body forecasts, this has a fixed cost and never aliases fast moons
-/// or truncates long-period dwarf-planet orbits.
 pub fn build_kepler_orbit_segments(
     world: &World,
     physics: &NBodySimulation,
