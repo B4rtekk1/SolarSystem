@@ -1445,7 +1445,9 @@ impl State {
             bytemuck::cast_slice(&[camera_uniform]),
         );
 
-        self.upload_orbit_segments();
+        if self.orbits_visible {
+            self.upload_orbit_segments();
+        }
 
         for entity in self.world.entities() {
             let uniform = entity_object_uniform(

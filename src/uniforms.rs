@@ -50,12 +50,31 @@ pub fn rendered_moon_offset(world: &World, moon: Entity, offset: Vec3) -> Vec3 {
         return offset;
     };
 
+    rendered_moon_offset_with_shell(
+        world,
+        moon,
+        offset,
+        moon_visual_shell_radius(world, parent, moon),
+    )
+}
+
+pub fn rendered_moon_offset_with_shell(
+    world: &World,
+    moon: Entity,
+    offset: Vec3,
+    shell_radius: f32,
+) -> Vec3 {
+    let Some(parent) = world.parent(moon).map(|parent| parent.entity) else {
+        return offset;
+    };
+
     let offset_length = offset.length();
     if offset_length <= f32::EPSILON {
-        return Vec3::X * visible_moon_orbit_radius(world, parent, moon, 0.0);
+        return Vec3::X * visible_moon_orbit_radius(world, parent, moon, 0.0, shell_radius);
     }
 
-    offset / offset_length * visible_moon_orbit_radius(world, parent, moon, offset_length)
+    offset / offset_length
+        * visible_moon_orbit_radius(world, parent, moon, offset_length, shell_radius)
 }
 
 fn visible_moon_orbit_radius(
@@ -63,6 +82,7 @@ fn visible_moon_orbit_radius(
     parent: Entity,
     moon: Entity,
     physical_offset: f32,
+    shell_radius: f32,
 ) -> f32 {
     let parent_radius = world.body(parent).render_radius;
     let moon_radius = world.body(moon).render_radius;
@@ -72,10 +92,10 @@ fn visible_moon_orbit_radius(
     } else {
         clearance + physical_offset * MOON_ORBIT_VISUAL_SCALE
     };
-    parent_clearance.max(minimum_sibling_shell_radius(world, parent, moon))
+    parent_clearance.max(shell_radius)
 }
 
-fn minimum_sibling_shell_radius(world: &World, parent: Entity, moon: Entity) -> f32 {
+pub fn moon_visual_shell_radius(world: &World, parent: Entity, moon: Entity) -> f32 {
     let parent_radius = world.body(parent).render_radius;
     let moon_body = world.body(moon);
     let moon_orbit_radius = moon_body
@@ -332,8 +352,8 @@ mod tests {
             Orbit::circular(0.00258, 12.0),
         ));
 
-        let inner_shell = minimum_sibling_shell_radius(&world, planet, inner);
-        let outer_shell = minimum_sibling_shell_radius(&world, planet, outer);
+        let inner_shell = moon_visual_shell_radius(&world, planet, inner);
+        let outer_shell = moon_visual_shell_radius(&world, planet, outer);
         let minimum_gap = world.body(inner).render_radius + world.body(outer).render_radius;
 
         assert!(outer_shell - inner_shell > minimum_gap);

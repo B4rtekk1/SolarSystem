@@ -24,6 +24,7 @@ pub fn build_orbit_segments(
     orbit_thickness_scale: f32,
     segments: &mut Vec<OrbitSegment>,
 ) {
+    let moon_shell_radii = moon_visual_shell_radii(world);
     let width_scale = orbit_width_scale * orbit_thickness_scale.max(0.0);
     let planet_half_width_pixels = PLANET_ORBIT_HALF_WIDTH_PIXELS * width_scale;
     let moon_half_width_pixels = MOON_ORBIT_HALF_WIDTH_PIXELS * width_scale;
@@ -112,7 +113,8 @@ pub fn build_orbit_segments(
         // stored in the forecast buffer.
         let raw_current_offset =
             dvec3_to_vec3(physics.render_position(*moon) - physics.render_position(parent));
-        let current_offset = rendered_moon_offset(world, *moon, raw_current_offset);
+        let current_offset =
+            rendered_moon_offset_cached(world, *moon, raw_current_offset, &moon_shell_radii);
         let moon_position = parent_position + current_offset;
 
         let start_index = nearest_orbit_offset_index(offsets, raw_current_offset);
@@ -126,8 +128,13 @@ pub fn build_orbit_segments(
             let age = (segment_index + 1) as f32 / segment_count as f32;
             let alpha = 0.36 * (1.0 - age).max(0.0) + 0.05;
             let vertex_color = [future_color[0], future_color[1], future_color[2], alpha];
-            let current =
-                parent_position + rendered_moon_offset(world, *moon, dvec3_to_vec3(offset));
+            let current = parent_position
+                + rendered_moon_offset_cached(
+                    world,
+                    *moon,
+                    dvec3_to_vec3(offset),
+                    &moon_shell_radii,
+                );
             if !is_reasonable_moon_orbit_segment(previous, current, parent_position) {
                 previous = current;
                 continue;
@@ -156,6 +163,7 @@ pub fn build_kepler_orbit_segments(
     orbit_thickness_scale: f32,
     segments: &mut Vec<OrbitSegment>,
 ) {
+    let moon_shell_radii = moon_visual_shell_radii(world);
     let width_scale = orbit_width_scale * orbit_thickness_scale.max(0.0);
     let planet_half_width_pixels = PLANET_ORBIT_HALF_WIDTH_PIXELS * width_scale;
     let moon_half_width_pixels = MOON_ORBIT_HALF_WIDTH_PIXELS * width_scale;
@@ -168,6 +176,7 @@ pub fn build_kepler_orbit_segments(
                 *entity,
                 KEPLER_PLANET_ORBIT_SEGMENTS,
                 planet_half_width_pixels,
+                &moon_shell_radii,
                 segments,
             );
         }
@@ -181,6 +190,7 @@ pub fn build_kepler_orbit_segments(
                 moon,
                 KEPLER_MOON_ORBIT_SEGMENTS,
                 moon_half_width_pixels,
+                &moon_shell_radii,
                 segments,
             );
         }
@@ -193,6 +203,7 @@ fn append_kepler_orbit(
     entity: Entity,
     segment_count: usize,
     half_width_pixels: f32,
+    moon_shell_radii: &[Option<f32>],
     segments: &mut Vec<OrbitSegment>,
 ) {
     let Some(orbit) = world.body(entity).orbit else {
@@ -214,10 +225,18 @@ fn append_kepler_orbit(
         },
     ];
 
-    let mut previous = kepler_orbit_point(world, entity, orbit, parent_position, 0.0);
+    let mut previous =
+        kepler_orbit_point(world, entity, orbit, parent_position, 0.0, moon_shell_radii);
     for index in 1..=segment_count {
         let anomaly = std::f32::consts::TAU * index as f32 / segment_count as f32;
-        let current = kepler_orbit_point(world, entity, orbit, parent_position, anomaly);
+        let current = kepler_orbit_point(
+            world,
+            entity,
+            orbit,
+            parent_position,
+            anomaly,
+            moon_shell_radii,
+        );
         segments.push(orbit_segment(previous, current, color, half_width_pixels));
         previous = current;
     }
@@ -229,6 +248,7 @@ fn kepler_orbit_point(
     orbit: crate::orbit::Orbit,
     parent_position: Vec3,
     true_anomaly: f32,
+    moon_shell_radii: &[Option<f32>],
 ) -> Vec3 {
     let semi_major = orbit.semi_major_axis.abs().max(f32::EPSILON);
     let semi_minor = orbit
@@ -255,10 +275,37 @@ fn kepler_orbit_point(
     );
 
     if world.kind(entity) == CelestialKind::Moon {
-        parent_position + rendered_moon_offset(world, entity, raw_offset)
+        parent_position + rendered_moon_offset_cached(world, entity, raw_offset, moon_shell_radii)
     } else {
         parent_position + raw_offset
     }
+}
+
+fn moon_visual_shell_radii(world: &World) -> Vec<Option<f32>> {
+    let mut radii = vec![None; world.entity_capacity()];
+    for moon in world.entities_of_kind(CelestialKind::Moon) {
+        let Some(parent) = world.parent(moon).map(|parent| parent.entity) else {
+            continue;
+        };
+        radii[moon.index()] = Some(moon_visual_shell_radius(world, parent, moon));
+    }
+    radii
+}
+
+fn rendered_moon_offset_cached(
+    world: &World,
+    moon: Entity,
+    offset: Vec3,
+    moon_shell_radii: &[Option<f32>],
+) -> Vec3 {
+    let Some(shell_radius) = moon_shell_radii
+        .get(moon.index())
+        .and_then(|radius| *radius)
+    else {
+        return rendered_moon_offset(world, moon, offset);
+    };
+
+    rendered_moon_offset_with_shell(world, moon, offset, shell_radius)
 }
 
 fn is_reasonable_moon_orbit_segment(previous: Vec3, current: Vec3, parent_position: Vec3) -> bool {
