@@ -60,6 +60,9 @@ const CONTROLS_PANEL_DEFAULT_HEIGHT: f32 = 520.0;
 const CONTROLS_PANEL_MIN_WIDTH: f32 = 280.0;
 const CONTROLS_PANEL_MIN_HEIGHT: f32 = 120.0;
 const DEFAULT_SAVE_PATH: &str = "solar_system.orbs";
+const STAR_PICK_RADIUS_SCALE: f32 = 1.08;
+const BODY_PICK_RADIUS_SCALE: f32 = 1.45;
+const MIN_BODY_PICK_RADIUS: f32 = 0.08;
 
 const UI_ACCENT: egui::Color32 = egui::Color32::from_rgb(92, 225, 255);
 const UI_TEXT: egui::Color32 = egui::Color32::from_rgb(226, 237, 250);
@@ -242,6 +245,15 @@ fn append_kind_batches(
     }
 
     batches
+}
+
+fn pick_radius(kind: CelestialKind, render_radius: f32) -> f32 {
+    match kind {
+        CelestialKind::Star => render_radius * STAR_PICK_RADIUS_SCALE,
+        CelestialKind::Planet | CelestialKind::Moon => {
+            (render_radius * BODY_PICK_RADIUS_SCALE).max(MIN_BODY_PICK_RADIUS)
+        }
+    }
 }
 
 pub struct State {
@@ -757,10 +769,31 @@ impl State {
                 true
             }
             Err(error) => {
-                self.save_status = Some(format!("Load failed: {error}"));
-                false
+                self.reset_to_builtin_solar_system();
+                self.save_status = Some(format!(
+                    "Ignored incompatible {DEFAULT_SAVE_PATH}; restored built-in Solar System ({error})"
+                ));
+                true
             }
         }
+    }
+
+    fn reset_to_builtin_solar_system(&mut self) {
+        let world = create_world();
+        let physics = NBodySimulation::from_world(&world, NBodyConfig::default());
+        self.initial_total_energy_by_entity = initial_total_energy_by_entity(&world, &physics);
+        self.world = world;
+        self.physics = physics;
+        self.selected_body = None;
+        self.camera_follow_enabled = false;
+        self.simulation_speed = DEFAULT_SIMULATION_SPEED;
+        self.simulation_paused = false;
+        self.orbits_visible = true;
+        self.planet_orbits_visible = true;
+        self.moon_orbits_visible = true;
+        self.orbit_thickness_scale = DEFAULT_ORBIT_THICKNESS_SCALE;
+        self.rotation_time = 0.0;
+        self.last_physics_update = Instant::now();
     }
 
     pub fn save_as_dialog(&mut self) -> bool {
@@ -964,12 +997,7 @@ impl State {
         }) {
             let center = rendered_entity_position(&self.world, &self.physics, entity);
             let body = self.world.body(entity);
-            let radius = match self.world.kind(entity) {
-                CelestialKind::Star => (body.render_radius * 2.0).max(0.5),
-                CelestialKind::Planet | CelestialKind::Moon => {
-                    (body.render_radius * 1.45).max(0.08)
-                }
-            };
+            let radius = pick_radius(self.world.kind(entity), body.render_radius);
             let Some(distance) = ray_sphere_distance(ray_origin, ray_direction, center, radius)
             else {
                 continue;
@@ -1642,5 +1670,24 @@ impl State {
 impl Drop for State {
     fn drop(&mut self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn star_pick_radius_tracks_visible_radius() {
+        let render_radius = 0.45;
+        let radius = pick_radius(CelestialKind::Star, render_radius);
+
+        assert!(radius > render_radius);
+        assert!(radius < render_radius * 1.1);
+    }
+
+    #[test]
+    fn small_body_pick_radius_keeps_minimum_click_target() {
+        assert_eq!(pick_radius(CelestialKind::Moon, 0.01), MIN_BODY_PICK_RADIUS);
     }
 }

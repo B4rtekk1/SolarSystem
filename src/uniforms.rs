@@ -8,6 +8,7 @@ pub type ObjectUniform = [f32; 32];
 
 const MOON_ORBIT_VISUAL_PADDING: f32 = 0.08;
 const MOON_ORBIT_VISUAL_SCALE: f32 = 8.0;
+const MOON_SIBLING_VISUAL_PADDING: f32 = 0.025;
 
 fn object_uniform(
     model: Mat4,
@@ -66,11 +67,49 @@ fn visible_moon_orbit_radius(
     let parent_radius = world.body(parent).render_radius;
     let moon_radius = world.body(moon).render_radius;
     let clearance = parent_radius + moon_radius + MOON_ORBIT_VISUAL_PADDING;
-    if physical_offset >= clearance {
+    let parent_clearance = if physical_offset >= clearance {
         physical_offset
     } else {
         clearance + physical_offset * MOON_ORBIT_VISUAL_SCALE
+    };
+    parent_clearance.max(minimum_sibling_shell_radius(world, parent, moon))
+}
+
+fn minimum_sibling_shell_radius(world: &World, parent: Entity, moon: Entity) -> f32 {
+    let parent_radius = world.body(parent).render_radius;
+    let moon_body = world.body(moon);
+    let moon_orbit_radius = moon_body
+        .orbit
+        .map_or(f32::INFINITY, |orbit| orbit.semi_major_axis.abs());
+    let mut previous_outer_edge = parent_radius + MOON_ORBIT_VISUAL_PADDING;
+
+    let mut siblings = world
+        .children_of_kind(parent, CelestialKind::Moon)
+        .map(|sibling| {
+            let body = world.body(sibling);
+            let orbit_radius = body
+                .orbit
+                .map_or(f32::INFINITY, |orbit| orbit.semi_major_axis.abs());
+            (sibling, orbit_radius, body.render_radius)
+        })
+        .collect::<Vec<_>>();
+    siblings.sort_by(|a, b| {
+        a.1.total_cmp(&b.1)
+            .then_with(|| a.0.index().cmp(&b.0.index()))
+    });
+
+    for (sibling, sibling_orbit_radius, sibling_radius) in siblings {
+        let shell_radius = previous_outer_edge + sibling_radius;
+        if sibling == moon {
+            return shell_radius;
+        }
+
+        if sibling_orbit_radius <= moon_orbit_radius {
+            previous_outer_edge = shell_radius + sibling_radius + MOON_SIBLING_VISUAL_PADDING;
+        }
     }
+
+    parent_radius + moon_body.render_radius + MOON_ORBIT_VISUAL_PADDING
 }
 
 fn selection_emphasis(world: &World, entity: Entity, selected_body: Option<Entity>) -> f32 {
@@ -246,6 +285,58 @@ mod tests {
         let minimum_separation = world.body(planet).render_radius + world.body(moon).render_radius;
 
         assert!(visible_distance > minimum_separation);
+    }
+
+    #[test]
+    fn close_moon_orbits_get_separate_visible_shells() {
+        let mut world = World::default();
+        let star = world.spawn(ObjectBundle {
+            name: "Star".to_string(),
+            kind: CelestialKind::Star,
+            parent: None,
+            body: BodyComponent::new(1.989e30, 696_340.0, None),
+            rotation: RotationComponent { speed: 0.0 },
+            render: RenderComponent {
+                material: MaterialComponent::Star(StarMaterial {
+                    base_color: Color::rgb(1.0, 0.8, 0.2),
+                    accent_color: Color::rgb(1.0, 1.0, 0.5),
+                    brightness: 1.0,
+                    surface_temperature: 5778.0,
+                }),
+            },
+            atmosphere: None,
+            ring: None,
+        });
+        let planet = world.spawn(test_surface_body(
+            "Planet",
+            CelestialKind::Planet,
+            Some(star),
+            5.972e24,
+            6_371.0,
+            Orbit::circular(1.0, 1.0),
+        ));
+        let inner = world.spawn(test_surface_body(
+            "Inner",
+            CelestialKind::Moon,
+            Some(planet),
+            7.342e22,
+            1_737.4,
+            Orbit::circular(0.00257, 12.0),
+        ));
+        let outer = world.spawn(test_surface_body(
+            "Outer",
+            CelestialKind::Moon,
+            Some(planet),
+            7.342e22,
+            1_737.4,
+            Orbit::circular(0.00258, 12.0),
+        ));
+
+        let inner_shell = minimum_sibling_shell_radius(&world, planet, inner);
+        let outer_shell = minimum_sibling_shell_radius(&world, planet, outer);
+        let minimum_gap = world.body(inner).render_radius + world.body(outer).render_radius;
+
+        assert!(outer_shell - inner_shell > minimum_gap);
     }
 
     fn test_surface_body(
