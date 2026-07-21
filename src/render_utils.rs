@@ -116,3 +116,18 @@ pub fn uniform_buffer_layout_entry(visibility: wgpu::ShaderStages) -> wgpu::Bind
         count: None,
     }
 }
+
+pub fn read_only_storage_buffer_layout_entry(
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}

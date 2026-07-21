@@ -123,18 +123,21 @@ pub fn show_selected_body_window(
         None
     };
 
-    let window_frame = egui::Frame::window(ctx.global_style().as_ref()).shadow(egui::Shadow::NONE);
+    let window_frame = egui::Frame::window(ctx.global_style().as_ref());
 
-    let window_title = match kind {
+    let body_kind = match kind {
         CelestialKind::Star => "Star",
         CelestialKind::Planet => "Planet",
         CelestialKind::Moon => "Moon",
     };
+    let window_title = format!("{}  ·  {body_kind}", world.name(body_entity));
 
     egui::Window::new(window_title)
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
         .collapsible(false)
-        .resizable(false)
+        .default_width(360.0)
+        .resizable(true)
+        .vscroll(true)
         .frame(window_frame)
         .show(ctx, |ui| {
             let mut edited_name = world.name(body_entity).to_owned();
@@ -161,7 +164,9 @@ pub fn show_selected_body_window(
                     let parent_relative_speed_au_per_year = parent_relative_velocity.length();
 
                     ui.label(format!("Parent planet: {}", world.name(parent)));
-                    ui.label(format!("Orbital speed around parent: {parent_relative_speed:.2} km/s"));
+                    ui.label(format!(
+                        "Orbital speed around parent: {parent_relative_speed:.2} km/s"
+                    ));
                     ui.label(format!(
                         "Parent-relative speed: {parent_relative_speed_au_per_year:.3} AU/year"
                     ));

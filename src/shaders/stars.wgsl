@@ -18,6 +18,7 @@ struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) local: vec2<f32>,
+    @location(2) size: f32,
 };
 
 @vertex
@@ -35,6 +36,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     out.clip_position = vec4<f32>(clip.xy + offset, clip.z, clip.w);
     out.color = star.color;
     out.local = local;
+    out.size = star.position_size.w;
 
     if (clip.w <= 0.0) {
         out.clip_position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
@@ -47,11 +49,19 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let radius = length(in.local);
-    let core = 1.0 - smoothstep(0.0, 0.34, radius);
-    let halo = 1.0 - smoothstep(0.16, 1.0, radius);
-    let dust = pow(max(1.0 - radius, 0.0), 2.2);
-    let glow = max(core, halo * 0.62 + dust * 0.38);
-    let sparkle = 1.0 + core * 0.65;
-    let color = in.color.rgb * sparkle;
+    if (in.size > 8.0) {
+        let cloud = pow(max(1.0 - radius, 0.0), 2.7);
+        let soft_core = 1.0 - smoothstep(0.0, 0.62, radius);
+        return vec4<f32>(in.color.rgb * (0.72 + soft_core * 0.36), in.color.a * cloud);
+    }
+
+    let core = 1.0 - smoothstep(0.0, 0.24, radius);
+    let halo = pow(max(1.0 - radius, 0.0), 2.6);
+    let cross_distance = min(abs(in.local.x), abs(in.local.y));
+    let rays = (1.0 - smoothstep(0.0, 0.075, cross_distance))
+        * (1.0 - smoothstep(0.12, 0.92, radius));
+    let sparkle_strength = smoothstep(1.65, 3.4, in.size);
+    let glow = max(core, halo * 0.62 + rays * sparkle_strength * 0.32);
+    let color = in.color.rgb * (1.0 + core * 0.78 + rays * sparkle_strength * 0.22);
     return vec4<f32>(color, in.color.a * glow);
 }

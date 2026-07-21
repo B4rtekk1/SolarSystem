@@ -19,6 +19,7 @@ var<storage, read> orbit_segments: array<OrbitSegment>;
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) edge: f32,
 };
 
 @vertex
@@ -52,10 +53,13 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
         clip_position.w,
     );
     out.color = segment.color;
+    out.edge = side;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    return in.color;
+    let feather = 1.0 - smoothstep(0.58, 1.0, abs(in.edge));
+    let glow = 0.82 + feather * 0.28;
+    return vec4<f32>(in.color.rgb * glow, in.color.a * feather);
 }

@@ -2,6 +2,7 @@ use crate::constants::CLICK_SELECTION_MAX_DRAG_PIXELS;
 use crate::state::State;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -40,7 +41,12 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window = Arc::new(
             event_loop
-                .create_window(WindowAttributes::default().with_title("Solar WGPU"))
+                .create_window(
+                    WindowAttributes::default()
+                        .with_title("Solar System — Interactive Orrery")
+                        .with_inner_size(PhysicalSize::new(1280, 800))
+                        .with_min_inner_size(PhysicalSize::new(900, 600)),
+                )
                 .unwrap(),
         );
 

@@ -1,8 +1,8 @@
 use crate::camera::Camera;
 use crate::constants::{
-    DEFAULT_ORBIT_THICKNESS_SCALE, DEFAULT_SIMULATION_SPEED, MAX_ORBIT_THICKNESS_SCALE,
-    MAX_SIMULATION_SPEED, MIN_ORBIT_THICKNESS_SCALE, MIN_SIMULATION_SPEED, MSAA_SAMPLE_COUNT,
-    OrbitSegment, SPHERE_LATITUDES, SPHERE_LONGITUDES,
+    DEFAULT_ORBIT_THICKNESS_SCALE, DEFAULT_SIMULATION_SPEED, GOOGLE_SANS_BYTES,
+    MAX_ORBIT_THICKNESS_SCALE, MAX_SIMULATION_SPEED, MIN_ORBIT_THICKNESS_SCALE,
+    MIN_SIMULATION_SPEED, MSAA_SAMPLE_COUNT, OrbitSegment, SPHERE_LATITUDES, SPHERE_LONGITUDES,
 };
 use crate::ecs::{CelestialKind, Entity, World};
 use crate::fps_overlay::FpsOverlay;
@@ -18,13 +18,16 @@ use crate::pipeline::{
 };
 use crate::render_utils::{
     DepthTarget, MsaaTarget, alpha_blending_fragment_state, alpha_blending_fragment_targets,
-    create_depth_target, create_msaa_target, depth_stencil_state, uniform_buffer_layout_entry,
+    create_depth_target, create_msaa_target, depth_stencil_state,
+    read_only_storage_buffer_layout_entry, uniform_buffer_layout_entry,
 };
 use crate::ring_particles::PlanetRingSystem;
 use crate::save::{SaveData, load_from_file, save_to_file};
 use crate::scene::create_world;
 use crate::stars::Starfield;
-use crate::uniforms::{entity_object_uniform, ray_sphere_distance, rendered_entity_position};
+use crate::uniforms::{
+    ObjectUniform, entity_object_uniform, ray_sphere_distance, rendered_entity_position,
+};
 use crate::utils::show_selected_body_window;
 use egui_wgpu::{
     Renderer as EguiRenderer, RendererOptions as EguiRendererOptions, ScreenDescriptor,
@@ -40,21 +43,129 @@ use winit::dpi::PhysicalSize;
 use winit::keyboard::KeyCode;
 use winit::window::{Fullscreen, Window};
 
-struct ObjectGpu {
-    entity: Entity,
-    object_buffer: wgpu::Buffer,
-    object_bind_group: wgpu::BindGroup,
+type IndexedIndirectArgs = [u32; 5];
+
+#[derive(Clone, Copy)]
+struct IndirectBatch {
+    offset: wgpu::BufferAddress,
+    instance_count: u32,
 }
 
 const MIN_WINDOW_CONTROL_WIDTH: u32 = 320;
 const MIN_WINDOW_CONTROL_HEIGHT: u32 = 240;
 const MAX_WINDOW_CONTROL_WIDTH: u32 = 7680;
 const MAX_WINDOW_CONTROL_HEIGHT: u32 = 4320;
-const CONTROLS_PANEL_DEFAULT_WIDTH: f32 = 300.0;
-const CONTROLS_PANEL_DEFAULT_HEIGHT: f32 = 360.0;
-const CONTROLS_PANEL_MIN_WIDTH: f32 = 240.0;
+const CONTROLS_PANEL_DEFAULT_WIDTH: f32 = 324.0;
+const CONTROLS_PANEL_DEFAULT_HEIGHT: f32 = 520.0;
+const CONTROLS_PANEL_MIN_WIDTH: f32 = 280.0;
 const CONTROLS_PANEL_MIN_HEIGHT: f32 = 120.0;
 const DEFAULT_SAVE_PATH: &str = "solar_system.orbs";
+
+const UI_ACCENT: egui::Color32 = egui::Color32::from_rgb(92, 225, 255);
+const UI_TEXT: egui::Color32 = egui::Color32::from_rgb(226, 237, 250);
+const UI_MUTED: egui::Color32 = egui::Color32::from_rgb(139, 160, 186);
+
+fn configure_egui(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "Google Sans".to_owned(),
+        Arc::new(egui::FontData::from_static(GOOGLE_SANS_BYTES)),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "Google Sans".to_owned());
+    ctx.set_fonts(fonts);
+
+    let mut style = (*ctx.global_style()).clone();
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.window_margin = egui::Margin::symmetric(16, 14);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style.spacing.interact_size.y = 30.0;
+    style.spacing.slider_width = 168.0;
+    style.text_styles.insert(
+        egui::TextStyle::Heading,
+        egui::FontId::new(20.0, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Body,
+        egui::FontId::new(14.5, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Button,
+        egui::FontId::new(14.5, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Small,
+        egui::FontId::new(12.0, egui::FontFamily::Proportional),
+    );
+
+    let mut visuals = egui::Visuals::dark();
+    visuals.override_text_color = Some(UI_TEXT);
+    visuals.weak_text_color = Some(UI_MUTED);
+    visuals.window_fill = egui::Color32::from_rgba_unmultiplied(7, 14, 30, 242);
+    visuals.panel_fill = egui::Color32::from_rgb(7, 14, 30);
+    visuals.extreme_bg_color = egui::Color32::from_rgb(4, 10, 24);
+    visuals.faint_bg_color = egui::Color32::from_rgb(12, 26, 48);
+    visuals.code_bg_color = egui::Color32::from_rgb(12, 26, 48);
+    visuals.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(35, 74, 104));
+    visuals.window_corner_radius = egui::CornerRadius::same(14);
+    visuals.menu_corner_radius = egui::CornerRadius::same(10);
+    visuals.window_shadow = egui::Shadow {
+        offset: [0, 10],
+        blur: 28,
+        spread: 2,
+        color: egui::Color32::from_black_alpha(130),
+    };
+    visuals.popup_shadow = visuals.window_shadow;
+    visuals.selection.bg_fill = egui::Color32::from_rgb(26, 121, 155);
+    visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+    visuals.hyperlink_color = UI_ACCENT;
+    visuals.slider_trailing_fill = true;
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+
+    visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(10, 22, 42);
+    visuals.widgets.noninteractive.weak_bg_fill = egui::Color32::from_rgb(10, 22, 42);
+    visuals.widgets.noninteractive.bg_stroke =
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(27, 55, 80));
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, UI_TEXT);
+    visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(8);
+
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(13, 29, 52);
+    visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(13, 29, 52);
+    visuals.widgets.inactive.bg_stroke =
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(31, 62, 88));
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, UI_TEXT);
+    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
+
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(18, 56, 79);
+    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(18, 56, 79);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, UI_ACCENT);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(8);
+
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(24, 112, 142);
+    visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(24, 112, 142);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, UI_ACCENT);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+    visuals.widgets.active.corner_radius = egui::CornerRadius::same(8);
+    visuals.widgets.open = visuals.widgets.active;
+
+    style.visuals = visuals;
+    ctx.set_global_style(style);
+}
+
+fn ui_section_heading(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(title.to_uppercase())
+            .size(11.0)
+            .color(UI_ACCENT)
+            .strong(),
+    );
+    ui.separator();
+}
 
 fn initial_total_energy_by_entity(world: &World, physics: &NBodySimulation) -> Vec<Option<f64>> {
     let mut energies = vec![None; world.entity_capacity()];
@@ -72,6 +183,65 @@ fn with_orbs_extension(mut path: PathBuf) -> PathBuf {
         path.set_extension("orbs");
     }
     path
+}
+
+fn indexed_indirect_args(
+    index_count: u32,
+    instance_count: u32,
+    first_instance: u32,
+) -> IndexedIndirectArgs {
+    [index_count, instance_count, 0, 0, first_instance]
+}
+
+fn entity_indirect_offset(entity: Entity) -> wgpu::BufferAddress {
+    (entity.index() * size_of::<IndexedIndirectArgs>()) as wgpu::BufferAddress
+}
+
+fn append_kind_batches(
+    world: &World,
+    kind: CelestialKind,
+    index_count: u32,
+    commands: &mut Vec<IndexedIndirectArgs>,
+) -> Vec<IndirectBatch> {
+    let mut batches = Vec::new();
+    let mut run_start = None;
+    let mut run_count = 0_u32;
+
+    for entity in world.entities() {
+        if world.kind(entity) == kind {
+            if run_start.is_none() {
+                run_start = Some(entity.index() as u32);
+            }
+            run_count += 1;
+        } else if let Some(first_instance) = run_start.take() {
+            let offset = (commands.len() * size_of::<IndexedIndirectArgs>()) as wgpu::BufferAddress;
+            commands.push(indexed_indirect_args(
+                index_count,
+                run_count,
+                first_instance,
+            ));
+            batches.push(IndirectBatch {
+                offset,
+                instance_count: run_count,
+            });
+            run_count = 0;
+        }
+    }
+
+    if let Some(first_instance) = run_start {
+        let offset = (commands.len() * size_of::<IndexedIndirectArgs>()) as wgpu::BufferAddress;
+        commands.push(indexed_indirect_args(
+            index_count,
+            run_count,
+            first_instance,
+        ));
+        batches.push(IndirectBatch {
+            offset,
+            instance_count: run_count,
+        });
+    }
+
+    batches
 }
 
 pub struct State {
@@ -92,7 +262,6 @@ pub struct State {
     text_overlay_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
-    index_count: u32,
     orbit_vertex_count: u32,
     orbit_buffer: wgpu::Buffer,
     fps_overlay: FpsOverlay,
@@ -102,7 +271,13 @@ pub struct State {
     orbit_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    object_gpu: Vec<ObjectGpu>,
+    object_buffer: wgpu::Buffer,
+    object_bind_group: wgpu::BindGroup,
+    object_uniforms: Vec<ObjectUniform>,
+    indirect_buffer: wgpu::Buffer,
+    star_batches: Vec<IndirectBatch>,
+    planet_batches: Vec<IndirectBatch>,
+    moon_batches: Vec<IndirectBatch>,
     msaa: MsaaTarget,
     depth: DepthTarget,
     camera: Camera,
@@ -143,8 +318,17 @@ impl State {
             .await
             .unwrap();
 
+        let adapter_features = adapter.features();
+        let required_features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
+        assert!(
+            adapter_features.contains(required_features),
+            "GPU adapter does not support INDIRECT_FIRST_INSTANCE"
+        );
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features,
+                ..Default::default()
+            })
             .await
             .unwrap();
 
@@ -211,7 +395,7 @@ impl State {
         let object_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Object Bind Group Layout"),
-                entries: &[uniform_buffer_layout_entry(
+                entries: &[read_only_storage_buffer_layout_entry(
                     wgpu::ShaderStages::VERTEX_FRAGMENT,
                 )],
             });
@@ -257,29 +441,23 @@ impl State {
         let physics = NBodySimulation::from_world(&world, NBodyConfig::default());
         let initial_total_energy_by_entity = initial_total_energy_by_entity(&world, &physics);
 
-        let mut object_gpu = Vec::with_capacity(world.entity_capacity());
-        for entity in world.entities() {
-            let object_uniform = entity_object_uniform(&world, &physics, entity, 0.0, None);
-            let object_name = world.name(entity);
-            let object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{object_name} Object Buffer")),
-                contents: bytemuck::cast_slice(&[object_uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-            let object_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("{object_name} Object Bind Group")),
-                layout: &object_bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: object_buffer.as_entire_binding(),
-                }],
-            });
-            object_gpu.push(ObjectGpu {
-                entity,
-                object_buffer,
-                object_bind_group,
-            });
-        }
+        let object_uniforms: Vec<ObjectUniform> = world
+            .entities()
+            .map(|entity| entity_object_uniform(&world, &physics, entity, 0.0, None))
+            .collect();
+        let object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Object Storage Buffer"),
+            contents: bytemuck::cast_slice(&object_uniforms),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let object_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Object Storage Bind Group"),
+            layout: &object_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: object_buffer.as_entire_binding(),
+            }],
+        });
 
         let orbit_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Orbit Storage Buffer"),
@@ -435,6 +613,33 @@ impl State {
             usage: wgpu::BufferUsages::INDEX,
         });
         let index_count = indices.len() as u32;
+        let mut indirect_commands: Vec<IndexedIndirectArgs> = world
+            .entities()
+            .map(|entity| indexed_indirect_args(index_count, 1, entity.index() as u32))
+            .collect();
+        let star_batches = append_kind_batches(
+            &world,
+            CelestialKind::Star,
+            index_count,
+            &mut indirect_commands,
+        );
+        let planet_batches = append_kind_batches(
+            &world,
+            CelestialKind::Planet,
+            index_count,
+            &mut indirect_commands,
+        );
+        let moon_batches = append_kind_batches(
+            &world,
+            CelestialKind::Moon,
+            index_count,
+            &mut indirect_commands,
+        );
+        let indirect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Sphere Indexed Indirect Buffer"),
+            contents: bytemuck::cast_slice(&indirect_commands),
+            usage: wgpu::BufferUsages::INDIRECT,
+        });
         let orbit_vertex_count = orbit_draw_vertex_count(&orbit_segments);
         let fps_overlay = FpsOverlay::new(
             &device,
@@ -446,6 +651,7 @@ impl State {
         let msaa = create_msaa_target(&device, config.width, config.height, format);
         let depth = create_depth_target(&device, config.width, config.height);
         let egui_ctx = egui::Context::default();
+        configure_egui(&egui_ctx);
         let egui_winit = EguiWinitState::new(
             egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -475,7 +681,6 @@ impl State {
             text_overlay_pipeline,
             vertex_buffer,
             index_buffer,
-            index_count,
             orbit_vertex_count,
             orbit_buffer,
             fps_overlay,
@@ -485,7 +690,13 @@ impl State {
             orbit_bind_group,
             camera_buffer,
             camera_bind_group,
-            object_gpu,
+            object_buffer,
+            object_bind_group,
+            object_uniforms,
+            indirect_buffer,
+            star_batches,
+            planet_batches,
+            moon_batches,
             msaa,
             depth,
             camera,
@@ -621,7 +832,7 @@ impl State {
 
     fn load_from_path(&mut self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let data = load_from_file(path)?;
-        if data.world.entity_capacity() != self.object_gpu.len() {
+        if data.world.entity_capacity() != self.object_uniforms.len() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Saved world is incompatible with the current renderer",
@@ -951,9 +1162,9 @@ impl State {
         let selected_body = self.selected_body;
 
         let full_output = egui_ctx.run_ui(raw_input, |ui| {
-            let window_frame = egui::Frame::window(ui.style().as_ref()).shadow(egui::Shadow::NONE);
-            egui::Window::new("Controls")
-                .default_pos(egui::pos2(8.0, 8.0))
+            let window_frame = egui::Frame::window(ui.style().as_ref());
+            egui::Window::new("Solar System")
+                .default_pos(egui::pos2(16.0, 16.0))
                 .collapsible(true)
                 .default_size(egui::vec2(
                     CONTROLS_PANEL_DEFAULT_WIDTH,
@@ -967,40 +1178,82 @@ impl State {
                 .vscroll(true)
                 .frame(window_frame)
                 .show(ui.ctx(), |ui| {
-                    let text = if simulation_paused { "Resume" } else { "Pause" };
-                    if ui.button(text).clicked() {
+                    ui.label(
+                        egui::RichText::new("INTERACTIVE ORRERY")
+                            .size(11.0)
+                            .color(UI_ACCENT)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new("Explore the Solar System")
+                            .size(20.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.horizontal(|ui| {
+                        let (status, color) = if simulation_paused {
+                            ("Simulation paused", egui::Color32::from_rgb(255, 191, 92))
+                        } else {
+                            ("Simulation running", egui::Color32::from_rgb(91, 232, 174))
+                        };
+                        ui.colored_label(color, "●");
+                        ui.label(egui::RichText::new(status).small().color(UI_MUTED));
+                    });
+                    ui.add_space(6.0);
+
+                    let text = if simulation_paused {
+                        "Resume simulation"
+                    } else {
+                        "Pause simulation"
+                    };
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 36.0],
+                            egui::Button::new(egui::RichText::new(text).strong()),
+                        )
+                        .clicked()
+                    {
                         simulation_paused = !simulation_paused;
                     }
+
+                    ui_section_heading(ui, "Time");
+                    ui.label("Simulation speed");
                     ui.add(
                         egui::Slider::new(
                             &mut simulation_speed,
                             MIN_SIMULATION_SPEED..=MAX_SIMULATION_SPEED,
                         )
-                        .text("Simulation Speed"),
+                        .logarithmic(true),
                     );
-                    ui.label(format!("{simulation_speed:.2}x"));
-                    ui.separator();
-                    ui.heading("Camera");
+                    ui.label(
+                        egui::RichText::new(format!("{simulation_speed:.2}× time scale"))
+                            .small()
+                            .color(UI_MUTED),
+                    );
+
+                    ui_section_heading(ui, "Camera");
                     ui.add_enabled_ui(selected_body.is_some(), |ui| {
                         ui.checkbox(&mut camera_follow_enabled, "Follow selected body");
                     });
-                    ui.separator();
-                    ui.heading("Orbits");
+                    ui.label(
+                        egui::RichText::new("Drag to pan · right-drag to orbit · scroll to zoom")
+                            .small()
+                            .color(UI_MUTED),
+                    );
+
+                    ui_section_heading(ui, "Orbit paths");
                     ui.checkbox(&mut orbits_visible, "Show orbits");
                     ui.add_enabled_ui(orbits_visible, |ui| {
-                        ui.checkbox(&mut planet_orbits_visible, "Show planet orbits");
-                        ui.checkbox(&mut moon_orbits_visible, "Show moon orbits");
-                        ui.add(
-                            egui::Slider::new(
-                                &mut orbit_thickness_scale,
-                                MIN_ORBIT_THICKNESS_SCALE..=MAX_ORBIT_THICKNESS_SCALE,
-                            )
-                            .text("Orbit thickness"),
-                        );
+                        ui.checkbox(&mut planet_orbits_visible, "Planet paths");
+                        ui.checkbox(&mut moon_orbits_visible, "Moon paths");
+                        ui.label("Orbit thickness");
+                        ui.add(egui::Slider::new(
+                            &mut orbit_thickness_scale,
+                            MIN_ORBIT_THICKNESS_SCALE..=MAX_ORBIT_THICKNESS_SCALE,
+                        ));
                     });
 
-                    ui.separator();
-                    ui.heading("Window");
+                    ui_section_heading(ui, "Viewport");
                     ui.horizontal(|ui| {
                         ui.label("Width");
                         ui.add(
@@ -1019,20 +1272,55 @@ impl State {
                                 .suffix(" px"),
                         );
                     });
-                    apply_window_size = ui.button("Apply size").clicked();
-                    ui.separator();
-                    ui.heading("Save");
-                    ui.horizontal(|ui| {
-                        save_requested = ui.button("Save").clicked();
-                        load_requested = ui.button("Load").clicked();
+                    apply_window_size = ui
+                        .add_sized(
+                            [ui.available_width(), 30.0],
+                            egui::Button::new("Apply size"),
+                        )
+                        .clicked();
+
+                    ui_section_heading(ui, "Scene file");
+                    ui.columns(2, |columns| {
+                        save_requested = columns[0]
+                            .add_sized(
+                                [columns[0].available_width(), 30.0],
+                                egui::Button::new("Save"),
+                            )
+                            .clicked();
+                        load_requested = columns[1]
+                            .add_sized(
+                                [columns[1].available_width(), 30.0],
+                                egui::Button::new("Load"),
+                            )
+                            .clicked();
                     });
-                    ui.horizontal(|ui| {
-                        save_as_requested = ui.button("Save As").clicked();
-                        load_file_requested = ui.button("Load File").clicked();
+                    ui.columns(2, |columns| {
+                        save_as_requested = columns[0]
+                            .add_sized(
+                                [columns[0].available_width(), 30.0],
+                                egui::Button::new("Save as…"),
+                            )
+                            .clicked();
+                        load_file_requested = columns[1]
+                            .add_sized(
+                                [columns[1].available_width(), 30.0],
+                                egui::Button::new("Open file…"),
+                            )
+                            .clicked();
                     });
                     if let Some(status) = &self.save_status {
-                        ui.label(status);
+                        ui.label(egui::RichText::new(status).small().color(UI_MUTED));
                     }
+
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(
+                            "F5 save  ·  F9 load  ·  F11 fullscreen  ·  Esc clear selection",
+                        )
+                        .small()
+                        .color(UI_MUTED),
+                    );
                 });
 
             let selected_initial_total_energy = selected_body
@@ -1131,20 +1419,21 @@ impl State {
 
         self.upload_orbit_segments();
 
-        for object_gpu in &self.object_gpu {
+        for entity in self.world.entities() {
             let uniform = entity_object_uniform(
                 &self.world,
                 &self.physics,
-                object_gpu.entity,
+                entity,
                 self.rotation_time,
                 self.selected_body,
             );
-            self.queue.write_buffer(
-                &object_gpu.object_buffer,
-                0,
-                bytemuck::cast_slice(&[uniform]),
-            );
+            self.object_uniforms[entity.index()] = uniform;
         }
+        self.queue.write_buffer(
+            &self.object_buffer,
+            0,
+            bytemuck::cast_slice(&self.object_uniforms),
+        );
 
         self.planet_rings.update(
             &self.queue,
@@ -1183,9 +1472,9 @@ impl State {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.01,
-                            g: 0.01,
-                            b: 0.04,
+                            r: 0.003,
+                            g: 0.008,
+                            b: 0.025,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Discard,
@@ -1211,16 +1500,11 @@ impl State {
 
             pass.set_pipeline(&self.sun_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            for object_gpu in self
-                .object_gpu
-                .iter()
-                .filter(|object| self.world.kind(object.entity) == CelestialKind::Star)
-            {
-                if self.selected_body == Some(object_gpu.entity) {
-                    continue;
+            pass.set_bind_group(1, &self.object_bind_group, &[]);
+            for batch in &self.star_batches {
+                if batch.instance_count > 0 {
+                    pass.draw_indexed_indirect(&self.indirect_buffer, batch.offset);
                 }
-                pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
-                pass.draw_indexed(0..self.index_count, 0, 0..1);
             }
 
             if self.orbits_visible && self.orbit_vertex_count > 0 {
@@ -1234,23 +1518,19 @@ impl State {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            for object_gpu in self
-                .object_gpu
-                .iter()
-                .filter(|object| self.world.kind(object.entity) == CelestialKind::Planet)
-            {
-                pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
-                pass.draw_indexed(0..self.index_count, 0, 0..1);
+            pass.set_bind_group(1, &self.object_bind_group, &[]);
+            for batch in &self.planet_batches {
+                if batch.instance_count > 0 {
+                    pass.draw_indexed_indirect(&self.indirect_buffer, batch.offset);
+                }
             }
 
             pass.set_pipeline(&self.moon_pipeline);
-            for object_gpu in self
-                .object_gpu
-                .iter()
-                .filter(|object| self.world.kind(object.entity) == CelestialKind::Moon)
-            {
-                pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
-                pass.draw_indexed(0..self.index_count, 0, 0..1);
+            pass.set_bind_group(1, &self.object_bind_group, &[]);
+            for batch in &self.moon_batches {
+                if batch.instance_count > 0 {
+                    pass.draw_indexed_indirect(&self.indirect_buffer, batch.offset);
+                }
             }
 
             if let Some(selected_body) = self.selected_body {
@@ -1262,46 +1542,49 @@ impl State {
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                     pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    for object_gpu in self
-                        .object_gpu
-                        .iter()
-                        .filter(|object| object.entity == selected_body)
-                    {
-                        pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
-                        pass.draw_indexed(0..self.index_count, 0, 0..1);
-                    }
+                    pass.set_bind_group(1, &self.object_bind_group, &[]);
+                    pass.draw_indexed_indirect(
+                        &self.indirect_buffer,
+                        entity_indirect_offset(selected_body),
+                    );
                 }
 
                 pass.set_pipeline(&self.planet_focus_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                for object_gpu in self.object_gpu.iter().filter(|object| {
-                    object.entity == selected_body
+                pass.set_bind_group(1, &self.object_bind_group, &[]);
+                for entity in self.world.entities().filter(|entity| {
+                    *entity == selected_body
                         || (self.world.kind(selected_body) == CelestialKind::Moon
-                            && self.world.kind(object.entity) == CelestialKind::Planet
+                            && self.world.kind(*entity) == CelestialKind::Planet
                             && self
                                 .world
                                 .parent(selected_body)
-                                .is_some_and(|parent| parent.entity == object.entity))
+                                .is_some_and(|parent| parent.entity == *entity))
                 }) {
-                    pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
-                    pass.draw_indexed(0..self.index_count, 0, 0..1);
+                    pass.draw_indexed_indirect(
+                        &self.indirect_buffer,
+                        entity_indirect_offset(entity),
+                    );
                 }
 
                 pass.set_pipeline(&self.moon_pipeline);
-                for object_gpu in self.object_gpu.iter().filter(|object| {
-                    object.entity == selected_body
+                pass.set_bind_group(1, &self.object_bind_group, &[]);
+                for entity in self.world.entities().filter(|entity| {
+                    *entity == selected_body
                         || (self.world.kind(selected_body) == CelestialKind::Planet
-                            && self.world.kind(object.entity) == CelestialKind::Moon
+                            && self.world.kind(*entity) == CelestialKind::Moon
                             && self
                                 .world
-                                .parent(object.entity)
+                                .parent(*entity)
                                 .is_some_and(|parent| parent.entity == selected_body))
                 }) {
-                    if self.world.kind(object_gpu.entity) == CelestialKind::Moon {
-                        pass.set_bind_group(1, &object_gpu.object_bind_group, &[]);
-                        pass.draw_indexed(0..self.index_count, 0, 0..1);
+                    if self.world.kind(entity) == CelestialKind::Moon {
+                        pass.draw_indexed_indirect(
+                            &self.indirect_buffer,
+                            entity_indirect_offset(entity),
+                        );
                     }
                 }
             }
